@@ -1,0 +1,12 @@
+docker exec -it pg_primary bash
+
+psql -U admin -d main_db
+
+CREATE USER replicator WITH REPLICATION ENCRYPTED PASSWORD 'replica_secret';
+\q
+
+echo "host replication replicator 192.168.65.1/32 md5" >> /var/lib/postgresql/data/pg_hba.conf
+
+exit
+
+docker restart pg_primary

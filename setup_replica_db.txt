@@ -1,0 +1,18 @@
+sudo docker-compose up -d
+
+sudo docker-compose stop
+
+sudo rm -rf ./pg_data/*
+
+sudo docker run --rm \
+  -v $(pwd)/pg_data:/var/lib/postgresql/data \
+  postgres:15 \
+  bash -c "PGPASSWORD=replica_secret pg_basebackup -h 10.7.0.7 -p 5432 -U replicator -D /var/lib/postgresql/data -Fp -Xs -P -R"
+
+sudo docker-compose up -d
+
+sudo docker exec -it pg_replica bash
+
+psql -U admin -d main_db
+
+somethingNew1223

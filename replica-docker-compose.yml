@@ -1,0 +1,13 @@
+version: "3.8"
+services:
+  postgres-replica:
+    image: postgres:15
+    container_name: pg_replica
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./pg_data:/var/lib/postgresql/data
+    environment:
+      PGDATA: /var/lib/postgresql/data
+    command: postgres -c hot_standby=on
+    restart: always
