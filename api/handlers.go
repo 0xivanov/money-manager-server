@@ -75,7 +75,7 @@ func GetAllUsers(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var users []User
+	users := make([]User, 0)
 	for rows.Next() {
 		var u User
 		if err := rows.Scan(&u.ID, &u.Username, &u.HashedPassword, &u.CreatedAt); err != nil {
@@ -226,8 +226,8 @@ func GetAllSpending(w http.ResponseWriter, r *http.Request) {
 	var err error
 
 	if userID != "" {
-		uid, err := strconv.Atoi(userID)
-		if err != nil {
+		uid, parseErr := strconv.Atoi(userID)
+		if parseErr != nil {
 			http.Error(w, "Invalid user_id parameter", http.StatusBadRequest)
 			return
 		}
@@ -242,15 +242,13 @@ func GetAllSpending(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var spendings []Spending
+	spendings := make([]Spending, 0)
 	for rows.Next() {
 		var s Spending
-		var dateStr string
-		if err := rows.Scan(&s.ID, &s.UserID, &s.Category, &s.Amount, &dateStr, &s.CreatedAt); err != nil {
+		if err := rows.Scan(&s.ID, &s.UserID, &s.Category, &s.Amount, &s.Date, &s.CreatedAt); err != nil {
 			http.Error(w, fmt.Sprintf("Failed to scan spending: %v", err), http.StatusInternalServerError)
 			return
 		}
-		s.Date, _ = time.Parse("2006-01-02", dateStr)
 		spendings = append(spendings, s)
 	}
 
@@ -384,8 +382,8 @@ func GetAllIncome(w http.ResponseWriter, r *http.Request) {
 	var err error
 
 	if userID != "" {
-		uid, err := strconv.Atoi(userID)
-		if err != nil {
+		uid, parseErr := strconv.Atoi(userID)
+		if parseErr != nil {
 			http.Error(w, "Invalid user_id parameter", http.StatusBadRequest)
 			return
 		}
@@ -400,15 +398,13 @@ func GetAllIncome(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var incomes []Income
+	incomes := make([]Income, 0)
 	for rows.Next() {
 		var i Income
-		var dateStr string
-		if err := rows.Scan(&i.ID, &i.UserID, &i.Category, &i.Amount, &dateStr, &i.CreatedAt); err != nil {
+		if err := rows.Scan(&i.ID, &i.UserID, &i.Category, &i.Amount, &i.Date, &i.CreatedAt); err != nil {
 			http.Error(w, fmt.Sprintf("Failed to scan income: %v", err), http.StatusInternalServerError)
 			return
 		}
-		i.Date, _ = time.Parse("2006-01-02", dateStr)
 		incomes = append(incomes, i)
 	}
 

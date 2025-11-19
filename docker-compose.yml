@@ -19,3 +19,44 @@ services:
       -c max_replication_slots=10 
       -c hot_standby_feedback=on
     restart: always
+    networks:
+      - money-manager-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d main_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  money-manager-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: money-manager-api
+    environment:
+      DATABASE_URL: "postgres://admin:admin_password@postgres-primary:5432/main_db?sslmode=disable"
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    restart: always
+    networks:
+      - money-manager-network
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://localhost:8080/users",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  money-manager-network:
+    driver: bridge

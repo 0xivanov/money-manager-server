@@ -41,12 +41,7 @@ func scanUser(row *sql.Row) (*User, error) {
 
 func scanSpending(row *sql.Row) (*Spending, error) {
 	var s Spending
-	var dateStr string
-	err := row.Scan(&s.ID, &s.UserID, &s.Category, &s.Amount, &dateStr, &s.CreatedAt)
-	if err != nil {
-		return nil, err
-	}
-	s.Date, err = time.Parse("2006-01-02", dateStr)
+	err := row.Scan(&s.ID, &s.UserID, &s.Category, &s.Amount, &s.Date, &s.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -55,12 +50,7 @@ func scanSpending(row *sql.Row) (*Spending, error) {
 
 func scanIncome(row *sql.Row) (*Income, error) {
 	var i Income
-	var dateStr string
-	err := row.Scan(&i.ID, &i.UserID, &i.Category, &i.Amount, &dateStr, &i.CreatedAt)
-	if err != nil {
-		return nil, err
-	}
-	i.Date, err = time.Parse("2006-01-02", dateStr)
+	err := row.Scan(&i.ID, &i.UserID, &i.Category, &i.Amount, &i.Date, &i.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
