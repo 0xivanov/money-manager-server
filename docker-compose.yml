@@ -1,0 +1,33 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: money-manager-db
+    environment:
+      POSTGRES_USER: money
+      POSTGRES_PASSWORD: money
+      POSTGRES_DB: money_manager
+    ports:
+      - "5432:5432"
+    volumes:
+      - money_manager_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U money -d money_manager"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    container_name: money-manager-api
+    environment:
+      PORT: 8080
+      DATABASE_URL: postgres://money:money@db:5432/money_manager?sslmode=disable
+      JWT_SECRET: change-this-secret-in-production
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  money_manager_pgdata:
