@@ -1,7 +1,9 @@
 package router
 
 import (
+	"encoding/csv"
 	"encoding/json"
+	"fmt"
 	"money-manager-server/internal/model"
 	"money-manager-server/internal/service"
 	"net/http"
@@ -24,6 +26,37 @@ func Build(s *service.Service) http.Handler {
 		resp, err := s.Login(r.Context(), req)
 		write(w, 200, resp, err)
 	})
+	m.HandleFunc("GET /categories", func(w http.ResponseWriter, r *http.Request) {
+		uid, ok := authUser(w, r, s)
+		if !ok {
+			return
+		}
+		out, err := s.ListCategories(r.Context(), uid, r.URL.Query().Get("type"))
+		write(w, 200, out, err)
+	})
+	m.HandleFunc("POST /categories", func(w http.ResponseWriter, r *http.Request) {
+		uid, ok := authUser(w, r, s)
+		if !ok {
+			return
+		}
+		var req model.CategoryRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		out, err := s.CreateCategory(r.Context(), uid, req)
+		write(w, 201, out, err)
+	})
+	m.HandleFunc("DELETE /categories/{id}", func(w http.ResponseWriter, r *http.Request) {
+		uid, ok := authUser(w, r, s)
+		if !ok {
+			return
+		}
+		id, _ := strconv.Atoi(r.PathValue("id"))
+		err := s.DeleteCategory(r.Context(), uid, id)
+		if err != nil {
+			write(w, 400, nil, err)
+			return
+		}
+		w.WriteHeader(204)
+	})
 	m.HandleFunc("GET /transactions", func(w http.ResponseWriter, r *http.Request) {
 		uid, ok := authUser(w, r, s)
 		if !ok {
@@ -31,6 +64,24 @@ func Build(s *service.Service) http.Handler {
 		}
 		out, err := s.Repo.ListTransactions(r.Context(), uid, r.URL.Query().Get("month"), r.URL.Query().Get("type"), r.URL.Query().Get("category"))
 		write(w, 200, out, err)
+	})
+	m.HandleFunc("GET /transactions/export", func(w http.ResponseWriter, r *http.Request) {
+		uid, ok := authUser(w, r, s)
+		if !ok {
+			return
+		}
+		from := r.URL.Query().Get("from")
+		to := r.URL.Query().Get("to")
+		out, err := s.ExportTransactions(r.Context(), uid, from, to)
+		if err != nil {
+			write(w, 400, nil, err)
+			return
+		}
+		w.Header().Set("Content-Type", "text/csv")
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="money-manager-%s-to-%s.csv"`, from, to))
+		if err := writeTransactionsCSV(w, out); err != nil {
+			write(w, 500, nil, err)
+		}
 	})
 	m.HandleFunc("GET /transactions/summary", func(w http.ResponseWriter, r *http.Request) {
 		uid, ok := authUser(w, r, s)
@@ -81,6 +132,27 @@ func Build(s *service.Service) http.Handler {
 		w.WriteHeader(204)
 	})
 	return m
+}
+
+func writeTransactionsCSV(w http.ResponseWriter, transactions []model.Transaction) error {
+	cw := csv.NewWriter(w)
+	if err := cw.Write([]string{"occurred_at", "type", "category", "description", "amount", "currency"}); err != nil {
+		return err
+	}
+	for _, transaction := range transactions {
+		if err := cw.Write([]string{
+			transaction.OccurredAt,
+			transaction.Type,
+			transaction.Category,
+			transaction.Description,
+			transaction.Amount,
+			transaction.Currency,
+		}); err != nil {
+			return err
+		}
+	}
+	cw.Flush()
+	return cw.Error()
 }
 
 func authUser(w http.ResponseWriter, r *http.Request, s *service.Service) (int, bool) {

@@ -14,19 +14,31 @@ type AuthResponse struct {
 }
 
 type Transaction struct {
-	ID         int    `json:"id"`
-	Type       string `json:"type"`
-	Category   string `json:"category"`
-	Amount     string `json:"amount"`
-	Currency   string `json:"currency"`
-	OccurredAt string `json:"occurred_at"`
+	ID          int    `json:"id"`
+	Type        string `json:"type"`
+	Category    string `json:"category"`
+	Description string `json:"description"`
+	Amount      string `json:"amount"`
+	Currency    string `json:"currency"`
+	OccurredAt  string `json:"occurred_at"`
 }
 type TransactionRequest struct {
-	Type       string `json:"type"`
-	Category   string `json:"category"`
-	Amount     string `json:"amount"`
-	Currency   string `json:"currency"`
-	OccurredAt string `json:"occurred_at"`
+	Type        string `json:"type"`
+	Category    string `json:"category"`
+	Description string `json:"description"`
+	Amount      string `json:"amount"`
+	Currency    string `json:"currency"`
+	OccurredAt  string `json:"occurred_at"`
+}
+type Category struct {
+	ID        int    `json:"id"`
+	Type      string `json:"type"`
+	Name      string `json:"name"`
+	IsDefault bool   `json:"is_default"`
+}
+type CategoryRequest struct {
+	Type string `json:"type"`
+	Name string `json:"name"`
 }
 type Summary struct {
 	Month            string `json:"month"`
