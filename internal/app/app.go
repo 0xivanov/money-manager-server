@@ -2,24 +2,86 @@ package app
 
 import (
 	"context"
-	"log"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
 	"money-manager-server/internal/config"
 	"money-manager-server/internal/router"
 	"money-manager-server/internal/service"
-	"net/http"
 )
 
-func Run() {
-	cfg := config.Load()
+func Run() error {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	slog.SetDefault(logger)
+
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load configuration: %w", err)
+	}
 	svc, err := service.New(context.Background(), cfg)
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("initialize service: %w", err)
 	}
 	defer svc.Close()
 
-	h := router.Build(svc)
-	log.Printf("Money Manager API listening on :%s", cfg.Port)
-	if err := http.ListenAndServe(":"+cfg.Port, h); err != nil {
-		log.Fatal(err)
+	handler := router.Build(svc, router.Options{
+		RequestBodyLimit:  cfg.RequestBodyLimit,
+		AuthRateLimit:     cfg.AuthRateLimit,
+		AuthRateWindow:    cfg.AuthRateWindow,
+		TrustedProxyCIDRs: cfg.TrustedProxyCIDRs,
+		TrustedProxyHops:  cfg.TrustedProxyHops,
+		Logger:            logger,
+	})
+	server := &http.Server{
+		Addr:              ":" + cfg.Port,
+		Handler:           handler,
+		ReadHeaderTimeout: cfg.HTTPReadHeaderTimeout,
+		ReadTimeout:       cfg.HTTPReadTimeout,
+		WriteTimeout:      cfg.HTTPWriteTimeout,
+		IdleTimeout:       cfg.HTTPIdleTimeout,
+		MaxHeaderBytes:    64 << 10,
+		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
+
+	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	serverErrors := make(chan error, 1)
+	go func() {
+		logger.Info("server listening", "address", server.Addr)
+		serverErrors <- server.ListenAndServe()
+	}()
+
+	select {
+	case err := <-serverErrors:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return fmt.Errorf("serve HTTP: %w", err)
+	case <-signalCtx.Done():
+		logger.Info("shutdown signal received")
+		stopSignals()
+	}
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+	defer cancelShutdown()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		_ = server.Close()
+		return fmt.Errorf("graceful shutdown: %w", err)
+	}
+	select {
+	case err := <-serverErrors:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("stop HTTP server: %w", err)
+		}
+	case <-time.After(time.Second):
+		return errors.New("HTTP server did not stop after shutdown")
+	}
+	logger.Info("server stopped")
+	return nil
 }

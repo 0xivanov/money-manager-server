@@ -1,5 +1,7 @@
 # Money Manager Server Initial Design Spec
 
+> Historical note: this file documents the original May 2026 implementation. It is not the current production contract. See the repository `README.md`, versioned SQL migrations, and tests for the hardened server behavior.
+
 Date: 16 May 2026
 Project: `money-manager-server`
 Audience: AI agents and engineers extending, debugging, or integrating the backend.
