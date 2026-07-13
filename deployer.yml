@@ -1,0 +1,31 @@
+name: money-manager-api
+image: ghcr.io/0xivanov/money-manager-server@sha256:a2ae69850551dd017748a54838bb537039bffb4d96eeb2962460b358c017d03d
+
+service:
+  port: 8080
+  health:
+    path: /readyz
+
+routing:
+  domain: money.0xivanov.dev
+
+deploy:
+  replicas: 2
+  strategy: rolling
+
+placement:
+  arch: linux/arm64
+  spread: true
+
+secrets:
+  - DATABASE_URL
+  - JWT_SECRET
+  - ENABLE_BANKING_APPLICATION_ID
+  - ENABLE_BANKING_PRIVATE_KEY_BASE64
+  - ENABLE_BANKING_CALLBACK_URL
+
+state:
+  mode: stateless
+
+resilience:
+  mode: resilient

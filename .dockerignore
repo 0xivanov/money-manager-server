@@ -1,0 +1,14 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+README.md
+docs
+ops
+deployer.yml
+docker-compose.yml
+**/*_test.go
+coverage.out
+bin
+tmp
