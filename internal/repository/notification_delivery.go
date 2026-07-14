@@ -25,6 +25,7 @@ func (r *Repository) ClaimNotificationDeliveries(
 	ctx context.Context,
 	now time.Time,
 	staleBefore time.Time,
+	expiredBefore time.Time,
 	platforms []string,
 	limit int,
 ) ([]NotificationDelivery, error) {
@@ -43,13 +44,34 @@ func (r *Repository) ClaimNotificationDeliveries(
 		  AND delivery.status='processing' AND delivery.locked_at < $3`, now, platforms, staleBefore); err != nil {
 		return nil, err
 	}
+	if _, err := tx.Exec(ctx, `UPDATE notification_deliveries delivery
+		SET status='dead',locked_at=NULL,last_error='notification expired before delivery',updated_at=now()
+		FROM notification_outbox notification
+		WHERE notification.id=delivery.notification_id AND delivery.status='pending'
+		  AND notification.created_at < $1`, expiredBefore); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE notification_outbox notification SET
+		status=CASE WHEN EXISTS(SELECT 1 FROM notification_deliveries delivery
+			WHERE delivery.notification_id=notification.id AND delivery.status='sent')
+			THEN 'sent' ELSE 'dead' END,
+		locked_at=NULL,
+		last_error=CASE WHEN EXISTS(SELECT 1 FROM notification_deliveries delivery
+			WHERE delivery.notification_id=notification.id AND delivery.status='sent')
+			THEN last_error ELSE 'notification expired before delivery' END,
+		updated_at=now()
+		WHERE notification.created_at < $1 AND notification.status IN ('pending','processing')
+		  AND NOT EXISTS(SELECT 1 FROM notification_deliveries delivery
+			WHERE delivery.notification_id=notification.id AND delivery.status IN ('pending','processing'))`, expiredBefore); err != nil {
+		return nil, err
+	}
 	if _, err := tx.Exec(ctx, `INSERT INTO notification_deliveries(notification_id,device_id,available_at)
 		SELECT notification.id,device.id,$1
 		FROM notification_outbox notification
 		JOIN push_devices device ON device.user_id=notification.user_id AND device.active
 		WHERE notification.status IN ('pending','processing') AND notification.available_at <= $1
-		  AND device.platform=ANY($2)
-		ON CONFLICT(notification_id,device_id) DO NOTHING`, now, platforms); err != nil {
+		  AND notification.created_at >= $3 AND device.platform=ANY($2)
+		ON CONFLICT(notification_id,device_id) DO NOTHING`, now, platforms, expiredBefore); err != nil {
 		return nil, err
 	}
 	rows, err := tx.Query(ctx, `WITH due AS (
@@ -60,6 +82,7 @@ func (r *Repository) ClaimNotificationDeliveries(
 		LEFT JOIN notification_preferences preferences ON preferences.user_id=notification.user_id
 		WHERE delivery.status='pending' AND delivery.available_at <= $1
 		  AND device.platform=ANY($2)
+		  AND notification.created_at >= $4
 		  AND (
 			preferences.quiet_hours_start IS NULL OR
 			preferences.quiet_hours_start = preferences.quiet_hours_end OR
@@ -87,7 +110,7 @@ func (r *Repository) ClaimNotificationDeliveries(
 	FROM claimed
 	JOIN push_devices device ON device.id=claimed.device_id
 	JOIN notification_outbox notification ON notification.id=claimed.notification_id
-	ORDER BY claimed.id`, now, platforms, limit)
+		ORDER BY claimed.id`, now, platforms, limit, expiredBefore)
 	if err != nil {
 		return nil, err
 	}

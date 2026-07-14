@@ -20,11 +20,12 @@ func TestNotificationDeliveryMaintenanceSendsRetriesAndDeactivates(t *testing.T)
 	var completions []completion
 	store := &fakeStore{
 		claimNotificationDeliveries: func(
-			_ context.Context, claimedAt, staleBefore time.Time, platforms []string, limit int,
+			_ context.Context, claimedAt, staleBefore, expiredBefore time.Time, platforms []string, limit int,
 		) ([]repository.NotificationDelivery, error) {
 			if !claimedAt.Equal(now) || !staleBefore.Equal(now.Add(-10*time.Minute)) ||
+				!expiredBefore.Equal(now.Add(-24*time.Hour)) ||
 				len(platforms) != 1 || platforms[0] != "ios" || limit != 25 {
-				t.Fatalf("claim arguments = %s, %s, %#v, %d", claimedAt, staleBefore, platforms, limit)
+				t.Fatalf("claim arguments = %s, %s, %s, %#v, %d", claimedAt, staleBefore, expiredBefore, platforms, limit)
 			}
 			return []repository.NotificationDelivery{
 				{ID: 1, Attempts: 1, Platform: "ios", DeviceToken: "good", AppID: "org.moneymanager.ios"},

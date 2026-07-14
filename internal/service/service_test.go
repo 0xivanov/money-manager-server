@@ -453,7 +453,7 @@ type fakeStore struct {
 	importOpenBankingTransactions   func(context.Context, int, int, []repository.OpenBankingTransactionSeed, time.Time) (model.OpenBankingSyncResult, error)
 	claimOpenBankingAccountsForSync func(context.Context, time.Time, time.Time, time.Time, int) ([]repository.OpenBankingSyncAccount, error)
 	releaseOpenBankingSyncClaim     func(context.Context, int) error
-	claimNotificationDeliveries     func(context.Context, time.Time, time.Time, []string, int) ([]repository.NotificationDelivery, error)
+	claimNotificationDeliveries     func(context.Context, time.Time, time.Time, time.Time, []string, int) ([]repository.NotificationDelivery, error)
 	completeNotificationDelivery    func(context.Context, int, bool, bool, bool, string, time.Time, time.Time) error
 	deleteUser                      func(context.Context, int) error
 }
@@ -739,10 +739,10 @@ func (f *fakeStore) ReleaseOpenBankingSyncClaim(ctx context.Context, accountID i
 }
 
 func (f *fakeStore) ClaimNotificationDeliveries(
-	ctx context.Context, now, staleBefore time.Time, platforms []string, limit int,
+	ctx context.Context, now, staleBefore, expiredBefore time.Time, platforms []string, limit int,
 ) ([]repository.NotificationDelivery, error) {
 	if f.claimNotificationDeliveries != nil {
-		return f.claimNotificationDeliveries(ctx, now, staleBefore, platforms, limit)
+		return f.claimNotificationDeliveries(ctx, now, staleBefore, expiredBefore, platforms, limit)
 	}
 	return []repository.NotificationDelivery{}, nil
 }

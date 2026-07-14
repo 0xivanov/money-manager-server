@@ -108,7 +108,7 @@ type Store interface {
 	ImportOpenBankingTransactions(context.Context, int, int, []repository.OpenBankingTransactionSeed, time.Time) (model.OpenBankingSyncResult, error)
 	ClaimOpenBankingAccountsForSync(context.Context, time.Time, time.Time, time.Time, int) ([]repository.OpenBankingSyncAccount, error)
 	ReleaseOpenBankingSyncClaim(context.Context, int) error
-	ClaimNotificationDeliveries(context.Context, time.Time, time.Time, []string, int) ([]repository.NotificationDelivery, error)
+	ClaimNotificationDeliveries(context.Context, time.Time, time.Time, time.Time, []string, int) ([]repository.NotificationDelivery, error)
 	CompleteNotificationDelivery(context.Context, int, bool, bool, bool, string, time.Time, time.Time) error
 }
 
