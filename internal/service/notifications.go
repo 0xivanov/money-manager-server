@@ -18,6 +18,7 @@ const (
 	maximumNotificationDeliveryAttempts = 8
 	notificationDeliveryBatchSize       = 25
 	notificationDeliveryLockTTL         = 10 * time.Minute
+	notificationDeliveryTTL             = 24 * time.Hour
 )
 
 func (s *Service) RunNotificationDeliveryMaintenance(ctx context.Context) (model.NotificationDeliveryResult, error) {
@@ -29,7 +30,8 @@ func (s *Service) RunNotificationDeliveryMaintenance(ctx context.Context) (model
 	}
 	now := s.now().UTC().Truncate(time.Second)
 	deliveries, err := s.store.ClaimNotificationDeliveries(
-		ctx, now, now.Add(-notificationDeliveryLockTTL), s.pushPlatforms, notificationDeliveryBatchSize,
+		ctx, now, now.Add(-notificationDeliveryLockTTL), now.Add(-notificationDeliveryTTL),
+		s.pushPlatforms, notificationDeliveryBatchSize,
 	)
 	if err != nil {
 		return model.NotificationDeliveryResult{}, apperrors.Internal(fmt.Errorf("claim notification deliveries: %w", err))

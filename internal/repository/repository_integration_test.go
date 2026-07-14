@@ -179,8 +179,14 @@ func TestRepositoryIntegration(t *testing.T) {
 		t.Fatalf("register push device: %v", err)
 	}
 	deliveryTime := claimTime.Add(time.Minute)
+	if _, err := pool.Exec(ctx, `INSERT INTO notification_outbox(
+		user_id,event_type,event_key,title,body,payload,created_at,updated_at
+	) VALUES($1,'budget_alert','expired-smoke','Expired','Do not deliver','{}',$2,$2)`,
+		user.ID, deliveryTime.Add(-48*time.Hour)); err != nil {
+		t.Fatalf("insert expired notification: %v", err)
+	}
 	deliveries, err := repo.ClaimNotificationDeliveries(
-		ctx, deliveryTime, deliveryTime.Add(-10*time.Minute), []string{"ios"}, 10,
+		ctx, deliveryTime, deliveryTime.Add(-10*time.Minute), deliveryTime.Add(-24*time.Hour), []string{"ios"}, 10,
 	)
 	if err != nil || len(deliveries) != 1 || deliveries[0].DeviceID != device.ID || deliveries[0].EventType != "bank_spending" {
 		t.Fatalf("claimed notification deliveries = %#v, %v", deliveries, err)
@@ -193,10 +199,17 @@ func TestRepositoryIntegration(t *testing.T) {
 	var outboxStatus, deliveryStatus string
 	if err := pool.QueryRow(ctx, `SELECT notification.status,delivery.status
 		FROM notification_outbox notification
-		JOIN notification_deliveries delivery ON delivery.notification_id=notification.id`).Scan(
+		JOIN notification_deliveries delivery ON delivery.notification_id=notification.id
+		WHERE notification.event_type='bank_spending'`).Scan(
 		&outboxStatus, &deliveryStatus,
 	); err != nil || outboxStatus != "sent" || deliveryStatus != "sent" {
 		t.Fatalf("notification statuses = %q/%q, %v", outboxStatus, deliveryStatus, err)
+	}
+	var expiredStatus string
+	if err := pool.QueryRow(ctx, `SELECT status FROM notification_outbox WHERE event_key='expired-smoke'`).Scan(
+		&expiredStatus,
+	); err != nil || expiredStatus != "dead" {
+		t.Fatalf("expired notification status = %q, %v", expiredStatus, err)
 	}
 	claimedAfterInterval, err := repo.ClaimOpenBankingAccountsForSync(
 		ctx, claimTime.Add(6*time.Hour+time.Second), claimTime.Add(12*time.Hour), claimTime.Add(6*time.Hour+5*time.Minute), 10,
