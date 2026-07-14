@@ -13,6 +13,10 @@ func (h *handler) registerInvestmentRoutes(mux *http.ServeMux) {
 		item, err := h.api.InvestmentPortfolio(request.Context(), userID)
 		writeJSONResult(w, request, h.options.Logger, http.StatusOK, item, err)
 	}))
+	mux.HandleFunc("GET /investments/portfolio/history", h.requireUser(func(w http.ResponseWriter, request *http.Request, userID int) {
+		item, err := h.api.InvestmentPortfolioHistory(request.Context(), userID, request.URL.Query().Get("range"))
+		writeJSONResult(w, request, h.options.Logger, http.StatusOK, item, err)
+	}))
 	mux.HandleFunc("GET /investments/trades", h.requireUser(func(w http.ResponseWriter, request *http.Request, userID int) {
 		query := request.URL.Query()
 		items, err := h.api.ListInvestmentTrades(

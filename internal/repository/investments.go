@@ -22,21 +22,66 @@ type InvestmentTradeFilter struct {
 }
 
 func (r *Repository) CreateInvestmentTrade(ctx context.Context, userID int, request model.InvestmentTradeRequest) (model.InvestmentTrade, error) {
-	row := r.db.QueryRow(ctx, `INSERT INTO investment_trades(
-		user_id,asset_type,symbol,asset_name,broker,side,quantity,price_per_unit,fees,currency,occurred_at,notes
-	) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-	RETURNING id,asset_type,symbol,asset_name,broker,side,quantity::text,price_per_unit::text,fees::text,
-		currency,to_char(occurred_at,'YYYY-MM-DD'),notes,
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return model.InvestmentTrade{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	lockKey := investmentPositionLockKey(userID, request.AssetType, request.Symbol, request.Broker)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, lockKey); err != nil {
+		return model.InvestmentTrade{}, err
+	}
+	if request.Side == "sell" {
+		var validLedger bool
+		err := tx.QueryRow(ctx, `WITH entries AS (
+			SELECT occurred_at,id::bigint AS sequence,
+				CASE side WHEN 'buy' THEN quantity ELSE -quantity END AS delta
+			FROM investment_trades
+			WHERE user_id=$1 AND asset_type=$2 AND symbol=$3 AND broker=$4
+			UNION ALL
+			SELECT $5::timestamptz,9223372036854775807::bigint,-$6::numeric
+		), balances AS (
+			SELECT sum(delta) OVER (ORDER BY occurred_at,sequence ROWS UNBOUNDED PRECEDING) AS quantity
+			FROM entries
+		)
+		SELECT COALESCE(bool_and(quantity >= 0),true) FROM balances`,
+			userID, request.AssetType, request.Symbol, request.Broker, request.OccurredAt, request.Quantity,
+		).Scan(&validLedger)
+		if err != nil {
+			return model.InvestmentTrade{}, err
+		}
+		if !validLedger {
+			return model.InvestmentTrade{}, ErrConflict
+		}
+	}
+	row := tx.QueryRow(ctx, `INSERT INTO investment_trades(
+		user_id,asset_type,symbol,asset_name,broker,side,amount,quantity,price_per_unit,
+		price_provider,price_as_of,fees,currency,occurred_at,notes
+	) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+	RETURNING id,asset_type,symbol,asset_name,broker,side,amount::text,quantity::text,
+		price_per_unit::text,price_provider,
+		to_char(price_as_of AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"'),fees::text,
+		currency,to_char(occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"'),notes,
 		to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"'),
 		to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"')`,
 		userID, request.AssetType, request.Symbol, request.AssetName, request.Broker, request.Side,
-		request.Quantity, request.PricePerUnit, request.Fees, request.Currency, request.OccurredAt, request.Notes)
-	return scanInvestmentTrade(row)
+		request.Amount, request.Quantity, request.PricePerUnit, request.PriceProvider, request.PriceAsOf,
+		request.Fees, request.Currency, request.OccurredAt, request.Notes)
+	item, err := scanInvestmentTrade(row)
+	if err != nil {
+		return model.InvestmentTrade{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return model.InvestmentTrade{}, err
+	}
+	return item, nil
 }
 
 func (r *Repository) ListInvestmentTrades(ctx context.Context, userID int, filter InvestmentTradeFilter) ([]model.InvestmentTrade, error) {
-	query := `SELECT id,asset_type,symbol,asset_name,broker,side,quantity::text,price_per_unit::text,fees::text,
-		currency,to_char(occurred_at,'YYYY-MM-DD'),notes,
+	query := `SELECT id,asset_type,symbol,asset_name,broker,side,amount::text,quantity::text,
+		price_per_unit::text,price_provider,
+		to_char(price_as_of AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"'),fees::text,
+		currency,to_char(occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"'),notes,
 		to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"'),
 		to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"')
 		FROM investment_trades WHERE user_id=$1`
@@ -46,7 +91,7 @@ func (r *Repository) ListInvestmentTrades(ctx context.Context, userID int, filte
 		args = append(args, filter.From)
 	}
 	if !filter.Through.IsZero() {
-		query += fmt.Sprintf(" AND occurred_at <= $%d", len(args)+1)
+		query += fmt.Sprintf(" AND occurred_at < $%d", len(args)+1)
 		args = append(args, filter.Through)
 	}
 	if filter.AssetType != "" {
@@ -83,14 +128,56 @@ func (r *Repository) ListInvestmentTrades(ctx context.Context, userID int, filte
 }
 
 func (r *Repository) DeleteInvestmentTrade(ctx context.Context, userID, tradeID int) error {
-	tag, err := r.db.Exec(ctx, `DELETE FROM investment_trades WHERE id=$1 AND user_id=$2`, tradeID, userID)
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var assetType, symbol, broker string
+	err = tx.QueryRow(ctx, `SELECT asset_type,symbol,broker
+		FROM investment_trades WHERE id=$1 AND user_id=$2`, tradeID, userID,
+	).Scan(&assetType, &symbol, &broker)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+
+	lockKey := investmentPositionLockKey(userID, assetType, symbol, broker)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, lockKey); err != nil {
+		return err
+	}
+	tag, err := tx.Exec(ctx, `DELETE FROM investment_trades WHERE id=$1 AND user_id=$2`, tradeID, userID)
 	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
 	}
-	return nil
+
+	var validLedger bool
+	err = tx.QueryRow(ctx, `WITH balances AS (
+		SELECT sum(CASE side WHEN 'buy' THEN quantity ELSE -quantity END)
+			OVER (ORDER BY occurred_at,id ROWS UNBOUNDED PRECEDING) AS quantity
+		FROM investment_trades
+		WHERE user_id=$1 AND asset_type=$2 AND symbol=$3 AND broker=$4
+	)
+	SELECT COALESCE(bool_and(quantity >= 0),true) FROM balances`,
+		userID, assetType, symbol, broker,
+	).Scan(&validLedger)
+	if err != nil {
+		return err
+	}
+	if !validLedger {
+		return ErrConflict
+	}
+	return tx.Commit(ctx)
+}
+
+func investmentPositionLockKey(userID int, assetType, symbol, broker string) string {
+	return fmt.Sprintf("%d:%s:%s:%s", userID, assetType, symbol, broker)
 }
 
 func (r *Repository) InvestmentHoldingQuantity(ctx context.Context, userID int, assetType, symbol, broker string) (string, error) {
@@ -291,8 +378,9 @@ func (r *Repository) QueueInvestmentReminder(ctx context.Context, schedule model
 func scanInvestmentTrade(row rowScanner) (model.InvestmentTrade, error) {
 	var item model.InvestmentTrade
 	err := row.Scan(&item.ID, &item.AssetType, &item.Symbol, &item.AssetName, &item.Broker,
-		&item.Side, &item.Quantity, &item.PricePerUnit, &item.Fees, &item.Currency,
-		&item.OccurredAt, &item.Notes, &item.CreatedAt, &item.UpdatedAt)
+		&item.Side, &item.Amount, &item.Quantity, &item.PricePerUnit, &item.PriceProvider,
+		&item.PriceAsOf, &item.Fees, &item.Currency, &item.OccurredAt, &item.Notes,
+		&item.CreatedAt, &item.UpdatedAt)
 	return item, err
 }
 

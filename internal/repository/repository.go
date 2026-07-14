@@ -36,6 +36,7 @@ func Open(ctx context.Context, databaseURL string, options Options) (*pgxpool.Po
 	poolConfig.MaxConnLifetime = options.MaxConnLifetime
 	poolConfig.MaxConnIdleTime = options.MaxConnIdleTime
 	poolConfig.HealthCheckPeriod = options.HealthCheckPeriod
+	poolConfig.ConnConfig.RuntimeParams["timezone"] = "UTC"
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {

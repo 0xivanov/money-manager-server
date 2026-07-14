@@ -40,17 +40,18 @@ func (c Config) validateAt(now time.Time) error {
 		errs = append(errs, errors.New("DB_MIN_CONNS must be between 0 and DB_MAX_CONNS"))
 	}
 	for name, value := range map[string]time.Duration{
-		"DB_MAX_CONN_LIFETIME":     c.DBMaxConnLifetime,
-		"DB_MAX_CONN_IDLE_TIME":    c.DBMaxConnIdleTime,
-		"DB_HEALTH_CHECK_PERIOD":   c.DBHealthCheckPeriod,
-		"STARTUP_TIMEOUT":          c.StartupTimeout,
-		"MIGRATION_TIMEOUT":        c.MigrationTimeout,
-		"SHUTDOWN_TIMEOUT":         c.ShutdownTimeout,
-		"HTTP_READ_HEADER_TIMEOUT": c.HTTPReadHeaderTimeout,
-		"HTTP_READ_TIMEOUT":        c.HTTPReadTimeout,
-		"HTTP_WRITE_TIMEOUT":       c.HTTPWriteTimeout,
-		"HTTP_IDLE_TIMEOUT":        c.HTTPIdleTimeout,
-		"AUTH_RATE_WINDOW":         c.AuthRateWindow,
+		"DB_MAX_CONN_LIFETIME":        c.DBMaxConnLifetime,
+		"DB_MAX_CONN_IDLE_TIME":       c.DBMaxConnIdleTime,
+		"DB_HEALTH_CHECK_PERIOD":      c.DBHealthCheckPeriod,
+		"STARTUP_TIMEOUT":             c.StartupTimeout,
+		"MIGRATION_TIMEOUT":           c.MigrationTimeout,
+		"SHUTDOWN_TIMEOUT":            c.ShutdownTimeout,
+		"HTTP_READ_HEADER_TIMEOUT":    c.HTTPReadHeaderTimeout,
+		"HTTP_READ_TIMEOUT":           c.HTTPReadTimeout,
+		"HTTP_WRITE_TIMEOUT":          c.HTTPWriteTimeout,
+		"HTTP_IDLE_TIMEOUT":           c.HTTPIdleTimeout,
+		"AUTH_RATE_WINDOW":            c.AuthRateWindow,
+		"MARKET_DATA_REQUEST_TIMEOUT": c.MarketDataRequestTimeout,
 	} {
 		if value <= 0 {
 			errs = append(errs, fmt.Errorf("%s must be positive", name))
@@ -61,6 +62,9 @@ func (c Config) validateAt(now time.Time) error {
 	}
 	if c.AuthRateLimit < 1 {
 		errs = append(errs, errors.New("AUTH_RATE_LIMIT must be at least 1"))
+	}
+	if c.MarketDataRequestTimeout > time.Minute {
+		errs = append(errs, errors.New("MARKET_DATA_REQUEST_TIMEOUT must be no more than 1m"))
 	}
 	if c.TrustedProxyHops < 0 {
 		errs = append(errs, errors.New("TRUSTED_PROXY_HOPS cannot be negative"))

@@ -282,6 +282,7 @@ func TestProtectedRouteInventoryRequiresAuthentication(t *testing.T) {
 		{http.MethodPost, "/push-devices"},
 		{http.MethodDelete, "/push-devices/1"},
 		{http.MethodGet, "/investments/portfolio"},
+		{http.MethodGet, "/investments/portfolio/history"},
 		{http.MethodGet, "/investments/trades"},
 		{http.MethodPost, "/investments/trades"},
 		{http.MethodDelete, "/investments/trades/1"},
@@ -435,6 +436,9 @@ func (*fakeAPI) ListInvestmentTrades(context.Context, int, string, string, strin
 func (*fakeAPI) DeleteInvestmentTrade(context.Context, int, int) error { return nil }
 func (*fakeAPI) InvestmentPortfolio(context.Context, int) (model.InvestmentPortfolio, error) {
 	return model.InvestmentPortfolio{Positions: []model.InvestmentPosition{}, Currency: "EUR"}, nil
+}
+func (*fakeAPI) InvestmentPortfolioHistory(context.Context, int, string) (model.InvestmentPortfolioHistory, error) {
+	return model.InvestmentPortfolioHistory{Points: []model.InvestmentPortfolioHistoryPoint{}, Currency: "EUR", Range: "1y"}, nil
 }
 func (*fakeAPI) SetManualInvestmentPrice(context.Context, int, model.InvestmentPriceRequest) (model.InvestmentPrice, error) {
 	return model.InvestmentPrice{Symbol: "BTC", Price: "1.00"}, nil

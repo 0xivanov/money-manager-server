@@ -106,6 +106,9 @@ func (r *Repository) ImportOpenBankingTransactions(
 		if len(metadata) == 0 {
 			metadata = json.RawMessage(`{}`)
 		}
+		effectiveType := item.Type
+		effectiveCategory := item.Category
+		effectiveMetadata := metadata
 		var transactionID int
 		err = tx.QueryRow(ctx, `INSERT INTO transactions(
 			user_id,type,category,description,amount,currency,occurred_at,source,status,
@@ -113,27 +116,45 @@ func (r *Repository) ImportOpenBankingTransactions(
 		) VALUES($1,$2,$3,$4,$5,$6,$7,'open_banking',$8,$9,$10,$11)
 		ON CONFLICT(user_id,source_account_id,external_id)
 		WHERE source='open_banking' AND source_account_id IS NOT NULL AND external_id IS NOT NULL
-		DO NOTHING RETURNING id`, userID, item.Type, item.Category, item.Description,
+		DO NOTHING RETURNING id`, userID, effectiveType, effectiveCategory, item.Description,
 			item.Amount, item.Currency, item.OccurredAt, item.Status, accountID,
-			item.ExternalID, metadata,
+			item.ExternalID, effectiveMetadata,
 		).Scan(&transactionID)
 		inserted := err == nil
 		previousStatus := ""
 		if errors.Is(err, pgx.ErrNoRows) {
-			err = tx.QueryRow(ctx, `SELECT id,status FROM transactions
+			var currentType, currentCategory string
+			var classificationOverride, typeOverride, categoryOverride bool
+			err = tx.QueryRow(ctx, `SELECT id,status,type,category,
+					source_metadata @> '{"classification_override":true}'::jsonb,
+					source_metadata @> '{"type_override":true}'::jsonb,
+					source_metadata @> '{"category_override":true}'::jsonb
+				FROM transactions
 				WHERE user_id=$1 AND source='open_banking' AND source_account_id=$2 AND external_id=$3
 				FOR UPDATE`, userID, accountID, item.ExternalID,
-			).Scan(&transactionID, &previousStatus)
+			).Scan(
+				&transactionID, &previousStatus, &currentType, &currentCategory,
+				&classificationOverride, &typeOverride, &categoryOverride,
+			)
 			if err != nil {
 				return model.OpenBankingSyncResult{}, err
+			}
+			classificationOverride = classificationOverride || typeOverride || categoryOverride
+			if classificationOverride {
+				effectiveType = currentType
+				effectiveCategory = currentCategory
+				effectiveMetadata, err = openBankingOverrideMetadata(metadata, typeOverride, categoryOverride)
+				if err != nil {
+					return model.OpenBankingSyncResult{}, err
+				}
 			}
 			tag, updateErr := tx.Exec(ctx, `UPDATE transactions SET
 				type=$1,category=$2,description=$3,amount=$4,currency=$5,occurred_at=$6,
 				status=$7,source_metadata=$8,updated_at=now()
 				WHERE id=$9 AND (type,category,description,amount,currency,occurred_at,status,source_metadata)
 				IS DISTINCT FROM ($1,$2,$3,$4::numeric,$5,$6::date,$7,$8::jsonb)`,
-				item.Type, item.Category, item.Description, item.Amount, item.Currency,
-				item.OccurredAt, item.Status, metadata, transactionID)
+				effectiveType, effectiveCategory, item.Description, item.Amount, item.Currency,
+				item.OccurredAt, item.Status, effectiveMetadata, transactionID)
 			if updateErr != nil {
 				return model.OpenBankingSyncResult{}, updateErr
 			}
@@ -148,7 +169,7 @@ func (r *Repository) ImportOpenBankingTransactions(
 			result.Imported++
 		}
 
-		becameBookedExpense := item.Type == "expense" && item.Status == "booked" &&
+		becameBookedExpense := effectiveType == "expense" && item.Status == "booked" &&
 			(inserted || previousStatus != "booked")
 		if initialSync || !becameBookedExpense {
 			continue
@@ -196,6 +217,31 @@ func (r *Repository) ImportOpenBankingTransactions(
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return model.OpenBankingSyncResult{}, err
+	}
+	return result, nil
+}
+
+func openBankingOverrideMetadata(metadata json.RawMessage, typeOverride, categoryOverride bool) (json.RawMessage, error) {
+	values := make(map[string]any)
+	if len(metadata) > 0 {
+		if err := json.Unmarshal(metadata, &values); err != nil {
+			return nil, fmt.Errorf("decode open banking source metadata: %w", err)
+		}
+	}
+	if values == nil {
+		values = make(map[string]any)
+	}
+	values["classification_override"] = true
+	values["category_source"] = "user_override"
+	if typeOverride {
+		values["type_override"] = true
+	}
+	if categoryOverride {
+		values["category_override"] = true
+	}
+	result, err := json.Marshal(values)
+	if err != nil {
+		return nil, fmt.Errorf("encode open banking source metadata: %w", err)
 	}
 	return result, nil
 }

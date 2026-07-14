@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -80,6 +81,58 @@ func TestRepositoryIntegration(t *testing.T) {
 		t.Fatalf("second delete error = %v", err)
 	}
 
+	tradeTime := time.Date(2026, 7, 11, 14, 30, 0, 0, time.UTC)
+	trade, err := repo.CreateInvestmentTrade(ctx, user.ID, model.InvestmentTradeRequest{
+		AssetType: "crypto", Symbol: "BTC", AssetName: "Bitcoin", Broker: "manual", Side: "buy",
+		Amount: "100.00", Quantity: "0.002", PricePerUnit: "50000", PriceProvider: "kraken",
+		PriceAsOf: tradeTime.Add(-time.Second).Format(time.RFC3339), Fees: "1.00", Currency: "EUR",
+		OccurredAt: tradeTime.Format(time.RFC3339), Notes: "integration buy",
+	})
+	if err != nil || trade.Amount != "100.00" || trade.Quantity != "0.002000000000000000" ||
+		trade.PriceProvider != "kraken" || trade.OccurredAt != tradeTime.Format(time.RFC3339) {
+		t.Fatalf("create investment trade = %#v, %v", trade, err)
+	}
+	investmentTrades, err := repo.ListInvestmentTrades(ctx, user.ID, InvestmentTradeFilter{
+		From:    time.Date(2026, time.July, 11, 0, 0, 0, 0, time.UTC),
+		Through: time.Date(2026, time.July, 12, 0, 0, 0, 0, time.UTC),
+	})
+	if err != nil || len(investmentTrades) != 1 || investmentTrades[0].ID != trade.ID {
+		t.Fatalf("list investment trades = %#v, %v", investmentTrades, err)
+	}
+	_, err = repo.CreateInvestmentTrade(ctx, user.ID, model.InvestmentTradeRequest{
+		AssetType: "crypto", Symbol: "BTC", AssetName: "Bitcoin", Broker: "manual", Side: "sell",
+		Amount: "150.00", Quantity: "0.003", PricePerUnit: "50000", PriceProvider: "kraken",
+		PriceAsOf: tradeTime.Add(time.Hour).Format(time.RFC3339), Fees: "0.00", Currency: "EUR",
+		OccurredAt: tradeTime.Add(time.Hour).Format(time.RFC3339),
+	})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("oversized investment sale error = %v", err)
+	}
+	sale, err := repo.CreateInvestmentTrade(ctx, user.ID, model.InvestmentTradeRequest{
+		AssetType: "crypto", Symbol: "BTC", AssetName: "Bitcoin", Broker: "manual", Side: "sell",
+		Amount: "50.00", Quantity: "0.001", PricePerUnit: "50000", PriceProvider: "kraken",
+		PriceAsOf: tradeTime.Add(time.Hour).Format(time.RFC3339), Fees: "0.00", Currency: "EUR",
+		OccurredAt: tradeTime.Add(time.Hour).Format(time.RFC3339),
+	})
+	if err != nil {
+		t.Fatalf("create valid investment sale: %v", err)
+	}
+	if err := repo.DeleteInvestmentTrade(ctx, user.ID, trade.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("delete depended-on investment buy error = %v", err)
+	}
+	if holding, err := repo.InvestmentHoldingQuantity(ctx, user.ID, "crypto", "BTC", "manual"); err != nil || holding != "0.001000000000000000" {
+		t.Fatalf("holding after rejected buy deletion = %q, %v", holding, err)
+	}
+	if err := repo.DeleteInvestmentTrade(ctx, user.ID, sale.ID); err != nil {
+		t.Fatalf("delete investment sale: %v", err)
+	}
+	if err := repo.DeleteInvestmentTrade(ctx, user.ID, trade.ID); err != nil {
+		t.Fatalf("delete investment buy: %v", err)
+	}
+	if err := repo.DeleteInvestmentTrade(ctx, user.ID, trade.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("delete missing investment trade error = %v", err)
+	}
+
 	validUntil := time.Now().UTC().Add(30 * 24 * time.Hour)
 	authorizationID, err := repo.CreateOpenBankingAuthorization(ctx, NewOpenBankingAuthorization{
 		UserID: user.ID, StateHash: strings.Repeat("a", 64), InstitutionName: "Revolut",
@@ -155,6 +208,67 @@ func TestRepositoryIntegration(t *testing.T) {
 	if err != nil || secondSync.Imported != 1 || secondSync.Unchanged != 1 || secondSync.Notifications != 1 {
 		t.Fatalf("incremental bank sync = %#v, %v", secondSync, err)
 	}
+	var bankTransactionID int
+	if err := pool.QueryRow(ctx, `SELECT id FROM transactions
+		WHERE user_id=$1 AND source_account_id=$2 AND external_id='bank-transaction-1'`,
+		user.ID, accountID,
+	).Scan(&bankTransactionID); err != nil {
+		t.Fatalf("find bank transaction for override: %v", err)
+	}
+	if _, err := repo.UpdateTransaction(ctx, user.ID, bankTransactionID, model.TransactionRequest{
+		Type: "income", Category: "gift", Description: "Manual correction", Amount: "42.80",
+		Currency: "EUR", OccurredAt: "2026-07-11",
+	}); err != nil {
+		t.Fatalf("override bank transaction classification: %v", err)
+	}
+	var overrideMetadataJSON string
+	if err := pool.QueryRow(ctx, `SELECT source_metadata::text FROM transactions WHERE id=$1`, bankTransactionID).Scan(
+		&overrideMetadataJSON,
+	); err != nil {
+		t.Fatalf("read bank transaction override metadata: %v", err)
+	}
+	var overrideMetadata map[string]any
+	if err := json.Unmarshal([]byte(overrideMetadataJSON), &overrideMetadata); err != nil {
+		t.Fatalf("decode bank transaction override metadata: %v", err)
+	}
+	if overrideMetadata["classification_override"] != true || overrideMetadata["type_override"] != true ||
+		overrideMetadata["category_override"] != true || overrideMetadata["category_source"] != "user_override" {
+		t.Fatalf("bank transaction override metadata = %#v", overrideMetadata)
+	}
+	thirdSync, err := repo.ImportOpenBankingTransactions(ctx, user.ID, accountID, []OpenBankingTransactionSeed{{
+		ExternalID: "bank-transaction-1", Type: "expense", Category: "transport",
+		Description: "Updated BOLT ride", Amount: "43.00", Currency: "EUR",
+		OccurredAt: monthStart.AddDate(0, 0, 10), Status: "booked",
+		Metadata: []byte(`{
+			"classification_source":"expense_keyword",
+			"classified_category":"transport",
+			"classified_type":"expense",
+			"category_source":"expense_keyword"
+		}`),
+	}}, claimTime)
+	if err != nil || thirdSync.Updated != 1 || thirdSync.Notifications != 0 {
+		t.Fatalf("bank sync after manual classification override = %#v, %v", thirdSync, err)
+	}
+	var storedType, storedCategory, storedDescription, storedAmount, storedMetadataJSON string
+	if err := pool.QueryRow(ctx, `SELECT type,category,description,amount::text,source_metadata::text
+		FROM transactions WHERE id=$1`, bankTransactionID,
+	).Scan(&storedType, &storedCategory, &storedDescription, &storedAmount, &storedMetadataJSON); err != nil {
+		t.Fatalf("read bank transaction after re-sync: %v", err)
+	}
+	if storedType != "income" || storedCategory != "gift" || storedDescription != "Updated BOLT ride" || storedAmount != "43.00" {
+		t.Fatalf("bank transaction after re-sync = %q/%q, %q, %q", storedType, storedCategory, storedDescription, storedAmount)
+	}
+	var storedMetadata map[string]any
+	if err := json.Unmarshal([]byte(storedMetadataJSON), &storedMetadata); err != nil {
+		t.Fatalf("decode re-synced bank transaction metadata: %v", err)
+	}
+	if storedMetadata["classification_source"] != "expense_keyword" ||
+		storedMetadata["classified_category"] != "transport" ||
+		storedMetadata["category_source"] != "user_override" ||
+		storedMetadata["classification_override"] != true ||
+		storedMetadata["type_override"] != true || storedMetadata["category_override"] != true {
+		t.Fatalf("re-synced bank transaction metadata = %#v", storedMetadata)
+	}
 	var bankTransactions, bankNotifications int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM transactions
 		WHERE user_id=$1 AND source='open_banking'`, user.ID).Scan(&bankTransactions); err != nil {
@@ -216,6 +330,303 @@ func TestRepositoryIntegration(t *testing.T) {
 	)
 	if err != nil || len(claimedAfterInterval) != 1 || claimedAfterInterval[0].AccountID != accountID {
 		t.Fatalf("open banking claim after interval = %#v, %v", claimedAfterInterval, err)
+	}
+}
+
+func TestInvestmentTradeMigrationBackfillsMarketDataAuditFields(t *testing.T) {
+	ctx, repo, pool := openIntegrationRepository(t, "Europe/Sofia")
+	var sessionTimezone string
+	if err := pool.QueryRow(ctx, `SHOW TIME ZONE`).Scan(&sessionTimezone); err != nil {
+		t.Fatal(err)
+	}
+	if sessionTimezone != "UTC" {
+		t.Fatalf("repository session timezone = %q", sessionTimezone)
+	}
+	if _, err := pool.Exec(ctx, `CREATE TABLE schema_migrations (
+		version BIGINT PRIMARY KEY,
+		name TEXT NOT NULL,
+		applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`); err != nil {
+		t.Fatalf("create migration table: %v", err)
+	}
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range migrations {
+		if item.version >= 10 {
+			break
+		}
+		if _, err := pool.Exec(ctx, item.sql); err != nil {
+			t.Fatalf("apply migration %d: %v", item.version, err)
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO schema_migrations(version,name) VALUES($1,$2)`, item.version, item.name); err != nil {
+			t.Fatalf("record migration %d: %v", item.version, err)
+		}
+	}
+
+	user, err := repo.RegisterUser(ctx, "investor@example.com", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO investment_trades(
+		user_id,asset_type,symbol,asset_name,broker,side,quantity,price_per_unit,
+		fees,currency,occurred_at,notes
+	) VALUES($1,'crypto','BTC','Bitcoin','manual','buy','0.0012345678','50000.12345678',
+		'1.25','EUR','2026-07-11','legacy trade')`, user.ID); err != nil {
+		t.Fatalf("insert legacy investment trade: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO investment_trades(
+		user_id,asset_type,symbol,asset_name,broker,side,quantity,price_per_unit,
+		fees,currency,occurred_at,notes
+	) VALUES($1,'crypto','ETH','Ethereum','manual','buy','0.0000000001','0.01000000',
+		'0','EUR','2026-07-10','sub-cent legacy trade')`, user.ID); err != nil {
+		t.Fatalf("insert sub-cent legacy investment trade: %v", err)
+	}
+
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatalf("upgrade investment trade schema: %v", err)
+	}
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatalf("repeat investment trade migration: %v", err)
+	}
+
+	var amount, quantity, provider, priceAsOf, occurredAt string
+	if err := pool.QueryRow(ctx, `SELECT amount::text,quantity::text,price_provider,
+		to_char(price_as_of AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+		to_char(occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"')
+		FROM investment_trades WHERE user_id=$1 AND notes='legacy trade'`, user.ID,
+	).Scan(&amount, &quantity, &provider, &priceAsOf, &occurredAt); err != nil {
+		t.Fatal(err)
+	}
+	if amount != "61.728542415765279684" || quantity != "0.001234567800000000" || provider != "legacy_manual" ||
+		priceAsOf != "2026-07-11T00:00:00Z" || occurredAt != "2026-07-11T00:00:00Z" {
+		t.Fatalf("backfilled trade = amount %q, quantity %q, provider %q, price %q, occurred %q",
+			amount, quantity, provider, priceAsOf, occurredAt)
+	}
+	if err := pool.QueryRow(ctx, `SELECT amount::text FROM investment_trades
+		WHERE user_id=$1 AND notes='sub-cent legacy trade'`, user.ID).Scan(&amount); err != nil {
+		t.Fatal(err)
+	}
+	if amount != "0.000000000001" {
+		t.Fatalf("sub-cent legacy amount = %q", amount)
+	}
+
+	if err := pool.QueryRow(ctx, `INSERT INTO investment_trades(
+		user_id,asset_type,symbol,asset_name,broker,side,quantity,price_per_unit,
+		fees,currency,occurred_at,notes
+	) VALUES($1,'crypto','BTC','Bitcoin','manual','buy','0.002','50000',
+		'0','EUR','2026-07-12','old binary insert')
+	RETURNING amount::text,price_provider,
+		to_char(price_as_of AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"')`, user.ID,
+	).Scan(&amount, &provider, &priceAsOf); err != nil {
+		t.Fatalf("insert through legacy compatibility trigger: %v", err)
+	}
+	if amount != "100" || provider != "legacy_manual" || priceAsOf != "2026-07-12T00:00:00Z" {
+		t.Fatalf("legacy compatibility insert = amount %q, provider %q, price %q", amount, provider, priceAsOf)
+	}
+
+	var dataType string
+	var precision, scale int
+	if err := pool.QueryRow(ctx, `SELECT data_type,numeric_precision,numeric_scale
+		FROM information_schema.columns
+		WHERE table_schema=current_schema() AND table_name='investment_trades' AND column_name='quantity'`,
+	).Scan(&dataType, &precision, &scale); err != nil {
+		t.Fatal(err)
+	}
+	if dataType != "numeric" || precision != 38 || scale != 18 {
+		t.Fatalf("quantity column = %s(%d,%d)", dataType, precision, scale)
+	}
+	var amountIsUnbounded bool
+	if err := pool.QueryRow(ctx, `SELECT numeric_precision IS NULL AND numeric_scale IS NULL
+		FROM information_schema.columns
+		WHERE table_schema=current_schema() AND table_name='investment_trades' AND column_name='amount'`,
+	).Scan(&amountIsUnbounded); err != nil {
+		t.Fatal(err)
+	}
+	if !amountIsUnbounded {
+		t.Fatal("amount column does not preserve arbitrary legacy decimal scale")
+	}
+}
+
+func TestOpenBankingCategoryMigrationBackfillsAndPreservesOverrides(t *testing.T) {
+	ctx, repo, pool := openIntegrationRepository(t)
+	if _, err := pool.Exec(ctx, `CREATE TABLE schema_migrations (
+		version BIGINT PRIMARY KEY,
+		name TEXT NOT NULL,
+		applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`); err != nil {
+		t.Fatalf("create migration table: %v", err)
+	}
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range migrations {
+		if item.version >= 11 {
+			break
+		}
+		if _, err := pool.Exec(ctx, item.sql); err != nil {
+			t.Fatalf("apply migration %d: %v", item.version, err)
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO schema_migrations(version,name) VALUES($1,$2)`, item.version, item.name); err != nil {
+			t.Fatalf("record migration %d: %v", item.version, err)
+		}
+	}
+
+	user, err := repo.RegisterUser(ctx, "category-backfill@example.com", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var connectionID int
+	if err := pool.QueryRow(ctx, `INSERT INTO open_banking_connections(
+		user_id,provider_session_id,institution_name,country,psu_type,status,valid_until
+	) VALUES($1,'backfill-session','Revolut','BG','personal','AUTHORIZED',now()+interval '30 days')
+	RETURNING id`, user.ID).Scan(&connectionID); err != nil {
+		t.Fatalf("insert open banking connection: %v", err)
+	}
+	var accountID int
+	if err := pool.QueryRow(ctx, `INSERT INTO open_banking_accounts(
+		connection_id,provider_account_id,identification_hash,name,cash_account_type,currency,provider_payload
+	) VALUES($1,'backfill-provider-account','backfill-account','Everyday','CACC','EUR','{}')
+	RETURNING id`, connectionID).Scan(&accountID); err != nil {
+		t.Fatalf("insert open banking account: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO transactions(
+		user_id,type,category,description,amount,currency,occurred_at,source,status,
+		source_account_id,external_id,source_metadata
+	) VALUES
+		($1,'expense','other','Unknown merchant',18.90,'EUR','2026-07-10','open_banking','booked',$2,
+			'mcc-food','{"merchant_category_code":"5411"}'),
+		($1,'expense','Other','BOLT.EU ride',12.00,'EUR','2026-07-10','open_banking','booked',$2,
+			'keyword-transport','{}'),
+		($1,'income','other','July payroll',3200.00,'EUR','2026-07-10','open_banking','booked',$2,
+			'income-salary','{}'),
+		($1,'income','salary','Legacy monthly payroll',3200.00,'EUR','2026-07-10','open_banking','booked',$2,
+			'legacy-auto-salary','{}'),
+		($1,'income','refund','Card payment reversal',25.00,'EUR','2026-07-10','open_banking','booked',$2,
+			'legacy-auto-refund','{}'),
+		($1,'expense','food','Legacy grocery merchant',30.00,'EUR','2026-07-10','open_banking','booked',$2,
+			'legacy-auto-food','{"merchant_category_code":"5411"}'),
+		($1,'expense','shopping','Legacy department store',40.00,'EUR','2026-07-10','open_banking','booked',$2,
+			'legacy-auto-shopping','{"merchant_category_code":"5311"}'),
+		($1,'expense','gift','Manual correction',20.00,'EUR','2026-07-10','open_banking','booked',$2,
+			'manual-gift','{}'),
+		($1,'expense','other','LIDL purchase',30.00,'EUR','2026-07-10','open_banking','booked',$2,
+			'override-other','{"classification_override":true,"category_override":true,"category_source":"user_override"}'),
+		($1,'expense','food','Previously classified',40.00,'EUR','2026-07-10','open_banking','booked',$2,
+			'automatic-food','{"classification_source":"mcc","classified_category":"food","classified_type":"expense","category_source":"mcc"}'),
+		($1,'expense','other','Unrecognized payment',50.00,'EUR','2026-07-10','open_banking','booked',$2,
+			'fallback-other','{}')`, user.ID, accountID); err != nil {
+		t.Fatalf("insert legacy open banking transactions: %v", err)
+	}
+
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatalf("apply category backfill migration: %v", err)
+	}
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatalf("repeat category backfill migration: %v", err)
+	}
+
+	type categoryRecord struct {
+		category string
+		metadata map[string]any
+	}
+	readRecord := func(externalID string) categoryRecord {
+		t.Helper()
+		var record categoryRecord
+		var metadataJSON []byte
+		if err := pool.QueryRow(ctx, `SELECT category,source_metadata FROM transactions
+			WHERE user_id=$1 AND source_account_id=$2 AND external_id=$3`,
+			user.ID, accountID, externalID,
+		).Scan(&record.category, &metadataJSON); err != nil {
+			t.Fatalf("read transaction %s: %v", externalID, err)
+		}
+		if err := json.Unmarshal(metadataJSON, &record.metadata); err != nil {
+			t.Fatalf("decode transaction %s metadata: %v", externalID, err)
+		}
+		return record
+	}
+
+	mccFood := readRecord("mcc-food")
+	if mccFood.category != "food" || mccFood.metadata["classification_source"] != "mcc" ||
+		mccFood.metadata["classified_category"] != "food" {
+		t.Fatalf("MCC backfill = %#v", mccFood)
+	}
+	keywordTransport := readRecord("keyword-transport")
+	if keywordTransport.category != "transport" || keywordTransport.metadata["classification_source"] != "expense_keyword" {
+		t.Fatalf("expense keyword backfill = %#v", keywordTransport)
+	}
+	incomeSalary := readRecord("income-salary")
+	if incomeSalary.category != "salary" || incomeSalary.metadata["classification_source"] != "income_keyword" {
+		t.Fatalf("income keyword backfill = %#v", incomeSalary)
+	}
+	legacyAutomaticCategories := map[string]string{
+		"legacy-auto-salary":   "salary",
+		"legacy-auto-refund":   "refund",
+		"legacy-auto-food":     "food",
+		"legacy-auto-shopping": "shopping",
+	}
+	for externalID, expectedCategory := range legacyAutomaticCategories {
+		record := readRecord(externalID)
+		if record.category != expectedCategory || record.metadata["classification_override"] != nil ||
+			record.metadata["category_override"] != nil {
+			t.Fatalf("legacy automatic classification %s was locked as an override: %#v", externalID, record)
+		}
+	}
+	manualGift := readRecord("manual-gift")
+	if manualGift.category != "gift" || manualGift.metadata["classification_override"] != true ||
+		manualGift.metadata["category_override"] != true || manualGift.metadata["category_source"] != "user_override" {
+		t.Fatalf("manual category preservation = %#v", manualGift)
+	}
+	overrideOther := readRecord("override-other")
+	if overrideOther.category != "other" || overrideOther.metadata["category_source"] != "user_override" {
+		t.Fatalf("explicit other override = %#v", overrideOther)
+	}
+	automaticFood := readRecord("automatic-food")
+	if automaticFood.category != "food" || automaticFood.metadata["classification_override"] != nil {
+		t.Fatalf("existing automatic classification = %#v", automaticFood)
+	}
+	if fallbackOther := readRecord("fallback-other"); fallbackOther.category != "other" {
+		t.Fatalf("unmatched fallback = %#v", fallbackOther)
+	}
+
+	result, err := repo.ImportOpenBankingTransactions(ctx, user.ID, accountID, []OpenBankingTransactionSeed{
+		{
+			ExternalID: "legacy-auto-salary", Type: "income", Category: "freelance",
+			Description: "ACME client invoice", Amount: "3200.00", Currency: "EUR",
+			OccurredAt: time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC), Status: "booked",
+			Metadata: []byte(`{
+				"classification_source":"income_keyword",
+				"classified_category":"freelance",
+				"classified_type":"income",
+				"category_source":"income_keyword"
+			}`),
+		},
+		{
+			ExternalID: "manual-gift", Type: "expense", Category: "transport",
+			Description: "Updated BOLT ride", Amount: "21.00", Currency: "EUR",
+			OccurredAt: time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC), Status: "booked",
+			Metadata: []byte(`{
+				"classification_source":"expense_keyword",
+				"classified_category":"transport",
+				"classified_type":"expense",
+				"category_source":"expense_keyword"
+			}`),
+		},
+	}, time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC))
+	if err != nil || result.Updated != 2 {
+		t.Fatalf("sync after migrated manual correction = %#v, %v", result, err)
+	}
+	legacySalary := readRecord("legacy-auto-salary")
+	if legacySalary.category != "freelance" || legacySalary.metadata["category_source"] != "income_keyword" ||
+		legacySalary.metadata["classification_override"] != nil {
+		t.Fatalf("legacy automatic category after sync = %#v", legacySalary)
+	}
+	manualGift = readRecord("manual-gift")
+	if manualGift.category != "gift" || manualGift.metadata["category_source"] != "user_override" ||
+		manualGift.metadata["classified_category"] != "transport" {
+		t.Fatalf("manual correction after sync = %#v", manualGift)
 	}
 }
 
@@ -283,7 +694,7 @@ func TestLegacySchemaUpgradeQuarantinesInvalidRows(t *testing.T) {
 	if err := pool.QueryRow(ctx, "SELECT count(*) FROM schema_migrations").Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if users != 1 || categories != 1 || transactions != 1 || quarantined != 8 || versions != 9 {
+	if users != 1 || categories != 1 || transactions != 1 || quarantined != 8 || versions != 11 {
 		t.Fatalf("legacy upgrade counts users=%d categories=%d transactions=%d quarantined=%d versions=%d", users, categories, transactions, quarantined, versions)
 	}
 	var email, transactionType, category, currency string
@@ -303,7 +714,7 @@ func TestLegacySchemaUpgradeQuarantinesInvalidRows(t *testing.T) {
 	}
 }
 
-func openIntegrationRepository(t *testing.T) (context.Context, *Repository, *pgxpool.Pool) {
+func openIntegrationRepository(t *testing.T, requestedTimezone ...string) (context.Context, *Repository, *pgxpool.Pool) {
 	t.Helper()
 	databaseURL := os.Getenv("TEST_DATABASE_URL")
 	if databaseURL == "" {
@@ -329,6 +740,9 @@ func openIntegrationRepository(t *testing.T) (context.Context, *Repository, *pgx
 	}
 	query := parsedURL.Query()
 	query.Set("search_path", schema)
+	if len(requestedTimezone) > 0 {
+		query.Set("timezone", requestedTimezone[0])
+	}
 	parsedURL.RawQuery = query.Encode()
 	pool, err := Open(ctx, parsedURL.String(), Options{
 		MaxConns: 4, MinConns: 0, MaxConnLifetime: time.Minute,
