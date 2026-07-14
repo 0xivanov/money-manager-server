@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"testing"
 	"time"
@@ -175,6 +176,164 @@ func TestOpenBankingTransactionsRequireOwnedAccountAndValidateProviderQuery(t *t
 	_, err = service.GetOpenBankingAccountTransactions(context.Background(), 7, 11, "", "2026-07-13", "", "", "", model.OpenBankingPSUContext{})
 	if apperrors.KindOf(err) != apperrors.KindValidation {
 		t.Fatalf("date_to without date_from error = %v", err)
+	}
+}
+
+func TestSyncOpenBankingAccountPaginatesNormalizesAndPersists(t *testing.T) {
+	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	requests := 0
+	client := &fakeOpenBankingClient{accountTransactions: func(
+		_ context.Context,
+		accountID string,
+		query url.Values,
+		headers enablebanking.PSUHeaders,
+	) (json.RawMessage, error) {
+		requests++
+		if accountID != "provider-account" || headers.IPAddress != "198.51.100.9" {
+			t.Fatalf("provider account/headers = %q / %#v", accountID, headers)
+		}
+		if query.Get("date_from") != "2026-04-14" || query.Get("date_to") != "2026-07-13" {
+			t.Fatalf("sync range = %v", query)
+		}
+		if requests == 1 {
+			if query.Get("continuation_key") != "" {
+				t.Fatalf("first continuation = %q", query.Get("continuation_key"))
+			}
+			return json.RawMessage(`{"transactions":[{
+				"entry_reference":"expense-1","merchant_category_code":"5411",
+				"transaction_amount":{"currency":"EUR","amount":"42.8"},
+				"credit_debit_indicator":"DBIT","status":"BOOK","booking_date":"2026-07-12",
+				"creditor":{"name":"Fresh Market"}
+			}],"continuation_key":"next-page"}`), nil
+		}
+		if query.Get("continuation_key") != "next-page" {
+			t.Fatalf("second continuation = %q", query.Get("continuation_key"))
+		}
+		return json.RawMessage(`{"transactions":[{
+			"transaction_id":"income-1","transaction_amount":{"currency":"EUR","amount":"3200"},
+			"credit_debit_indicator":"CRDT","status":"BOOK","transaction_date":"2026-07-10",
+			"debtor":{"name":"Monthly salary"}
+		},{
+			"transaction_id":"ignored-usd","transaction_amount":{"currency":"USD","amount":"12"},
+			"credit_debit_indicator":"DBIT","status":"BOOK","booking_date":"2026-07-11"
+		}]}`), nil
+	}}
+	var stored []repository.OpenBankingTransactionSeed
+	store := &fakeStore{
+		getOpenBankingAccount: func(context.Context, int, int) (repository.OpenBankingAccountRecord, error) {
+			return repository.OpenBankingAccountRecord{ProviderAccountID: "provider-account"}, nil
+		},
+		importOpenBankingTransactions: func(
+			_ context.Context,
+			userID int,
+			accountID int,
+			seeds []repository.OpenBankingTransactionSeed,
+			syncedAt time.Time,
+		) (model.OpenBankingSyncResult, error) {
+			if userID != 7 || accountID != 11 || syncedAt != now {
+				t.Fatalf("store sync context = %d/%d at %s", userID, accountID, syncedAt)
+			}
+			stored = seeds
+			return model.OpenBankingSyncResult{Imported: len(seeds)}, nil
+		},
+	}
+	service := openBankingTestService(store, client, now)
+	result, err := service.SyncOpenBankingAccount(
+		context.Background(), 7, 11, "", "", model.OpenBankingPSUContext{IPAddress: "198.51.100.9"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 2 || result.Fetched != 3 || result.Imported != 2 || result.Ignored != 1 || len(stored) != 2 {
+		t.Fatalf("sync result = %#v, requests=%d, stored=%#v", result, requests, stored)
+	}
+	if stored[0].Type != "expense" || stored[0].Category != "food" || stored[0].Amount != "42.80" || stored[0].Description != "Fresh Market" {
+		t.Fatalf("expense seed = %#v", stored[0])
+	}
+	if stored[1].Type != "income" || stored[1].Category != "salary" || stored[1].Amount != "3200.00" {
+		t.Fatalf("income seed = %#v", stored[1])
+	}
+}
+
+func TestNormalizeOpenBankingTransactionPrefersStableEntryReference(t *testing.T) {
+	today := time.Date(2026, 7, 13, 0, 0, 0, 0, time.UTC)
+	transaction := func(detailID string) repository.OpenBankingTransactionSeed {
+		raw := json.RawMessage(`{
+			"entry_reference":"stable-reference",
+			"transaction_id":"` + detailID + `",
+			"transaction_amount":{"currency":"EUR","amount":"12.50"},
+			"credit_debit_indicator":"DBIT",
+			"status":"BOOK",
+			"booking_date":"2026-07-12",
+			"creditor":{"name":"Market"}
+		}`)
+		item, ok := normalizeOpenBankingTransaction(raw, today)
+		if !ok {
+			t.Fatalf("transaction %q was ignored", detailID)
+		}
+		return item
+	}
+	first := transaction("temporary-detail-id-1")
+	second := transaction("temporary-detail-id-2")
+	if first.ExternalID != "stable-reference" || second.ExternalID != first.ExternalID {
+		t.Fatalf("external IDs = %q and %q", first.ExternalID, second.ExternalID)
+	}
+}
+
+func TestOpenBankingBackgroundMaintenanceClaimsOnceAndContinuesAfterFailure(t *testing.T) {
+	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	var released []int
+	store := &fakeStore{
+		claimOpenBankingAccountsForSync: func(
+			_ context.Context, claimedAt, nextAttempt, claimUntil time.Time, limit int,
+		) ([]repository.OpenBankingSyncAccount, error) {
+			if !claimedAt.Equal(now) || !nextAttempt.Equal(now.Add(6*time.Hour)) ||
+				!claimUntil.Equal(now.Add(5*time.Minute)) || limit != 10 {
+				t.Fatalf("claim window = %s, %s, %s, %d", claimedAt, nextAttempt, claimUntil, limit)
+			}
+			return []repository.OpenBankingSyncAccount{{UserID: 1, AccountID: 10}, {UserID: 2, AccountID: 20}}, nil
+		},
+		getOpenBankingAccount: func(_ context.Context, userID, accountID int) (repository.OpenBankingAccountRecord, error) {
+			return repository.OpenBankingAccountRecord{
+				Account:           model.OpenBankingAccount{ID: accountID},
+				ProviderAccountID: fmt.Sprintf("provider-%d", userID),
+			}, nil
+		},
+		importOpenBankingTransactions: func(
+			_ context.Context, userID, accountID int, _ []repository.OpenBankingTransactionSeed, _ time.Time,
+		) (model.OpenBankingSyncResult, error) {
+			if userID != 1 || accountID != 10 {
+				t.Fatalf("unexpected persisted account %d/%d", userID, accountID)
+			}
+			return model.OpenBankingSyncResult{Imported: 1, Notifications: 1}, nil
+		},
+		releaseOpenBankingSyncClaim: func(_ context.Context, accountID int) error {
+			released = append(released, accountID)
+			return nil
+		},
+	}
+	client := &fakeOpenBankingClient{
+		accountTransactions: func(_ context.Context, accountID string, _ url.Values, headers enablebanking.PSUHeaders) (json.RawMessage, error) {
+			if headers != (enablebanking.PSUHeaders{}) {
+				t.Fatalf("background sync sent PSU headers: %#v", headers)
+			}
+			if accountID == "provider-2" {
+				return nil, errors.New("provider unavailable")
+			}
+			return json.RawMessage(`{"transactions":[]}`), nil
+		},
+	}
+	service := openBankingTestService(store, client, now)
+	result, err := service.RunOpenBankingSyncMaintenance(context.Background())
+	if err == nil {
+		t.Fatal("maintenance error = nil")
+	}
+	if result.Claimed != 2 || result.Succeeded != 1 || result.Failed != 1 ||
+		result.Imported != 1 || result.Notifications != 1 {
+		t.Fatalf("maintenance result = %#v", result)
+	}
+	if len(released) != 1 || released[0] != 20 {
+		t.Fatalf("released claims = %#v", released)
 	}
 }
 

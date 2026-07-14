@@ -209,6 +209,43 @@ func TestOpenBankingProviderJSONIsNotDoubleEncoded(t *testing.T) {
 	}
 }
 
+func TestTransactionScheduleEndpointsRequireAuthenticationAndReturnState(t *testing.T) {
+	handler := testHandler(&fakeAPI{}, Options{})
+
+	unauthorized := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/schedules", nil))
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized schedules response = %d %s", unauthorized.Code, unauthorized.Body.String())
+	}
+
+	create := httptest.NewRequest(http.MethodPost, "/schedules", strings.NewReader(
+		`{"type":"expense","name":"Rent","category":"Housing","amount":"1200","frequency":"monthly","start_date":"2026-08-01","auto_post":true}`,
+	))
+	create.Header.Set("Authorization", "Bearer valid")
+	create.Header.Set("Content-Type", "application/json")
+	created := httptest.NewRecorder()
+	handler.ServeHTTP(created, create)
+	if created.Code != http.StatusCreated || !strings.Contains(created.Body.String(), `"name":"Rent"`) {
+		t.Fatalf("create schedule response = %d %s", created.Code, created.Body.String())
+	}
+
+	pause := httptest.NewRequest(http.MethodPost, "/schedules/9/pause", nil)
+	pause.Header.Set("Authorization", "Bearer valid")
+	paused := httptest.NewRecorder()
+	handler.ServeHTTP(paused, pause)
+	if paused.Code != http.StatusOK || !strings.Contains(paused.Body.String(), `"status":"paused"`) {
+		t.Fatalf("pause schedule response = %d %s", paused.Code, paused.Body.String())
+	}
+
+	occurrences := httptest.NewRequest(http.MethodGet, "/schedule-occurrences?from=2026-08-01&through=2026-08-31", nil)
+	occurrences.Header.Set("Authorization", "Bearer valid")
+	listed := httptest.NewRecorder()
+	handler.ServeHTTP(listed, occurrences)
+	if listed.Code != http.StatusOK || strings.TrimSpace(listed.Body.String()) != "[]" {
+		t.Fatalf("schedule occurrences response = %d %s", listed.Code, listed.Body.String())
+	}
+}
+
 func testHandler(api API, options Options) http.Handler {
 	options.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	return Build(api, options)
@@ -267,6 +304,86 @@ func (*fakeAPI) DeleteTransaction(context.Context, int, int) error { return nil 
 func (*fakeAPI) ImportRevolutCSV(context.Context, int, []byte) (model.ImportResult, error) {
 	return model.ImportResult{}, nil
 }
+func (*fakeAPI) ListTransactionSchedules(context.Context, int, string) ([]model.TransactionSchedule, error) {
+	return []model.TransactionSchedule{}, nil
+}
+func (*fakeAPI) CreateTransactionSchedule(context.Context, int, model.TransactionScheduleRequest) (model.TransactionSchedule, error) {
+	return model.TransactionSchedule{ID: 9, Name: "Rent", Status: "active"}, nil
+}
+func (*fakeAPI) GetTransactionSchedule(context.Context, int, int) (model.TransactionSchedule, error) {
+	return model.TransactionSchedule{ID: 9, Name: "Rent", Status: "active"}, nil
+}
+func (*fakeAPI) UpdateTransactionSchedule(context.Context, int, int, model.TransactionScheduleRequest) (model.TransactionSchedule, error) {
+	return model.TransactionSchedule{ID: 9, Name: "Rent", Status: "active"}, nil
+}
+func (*fakeAPI) PauseTransactionSchedule(context.Context, int, int) (model.TransactionSchedule, error) {
+	return model.TransactionSchedule{ID: 9, Name: "Rent", Status: "paused"}, nil
+}
+func (*fakeAPI) ResumeTransactionSchedule(context.Context, int, int) (model.TransactionSchedule, error) {
+	return model.TransactionSchedule{ID: 9, Name: "Rent", Status: "active"}, nil
+}
+func (*fakeAPI) DeleteTransactionSchedule(context.Context, int, int) error { return nil }
+func (*fakeAPI) ListTransactionScheduleOccurrences(context.Context, int, string, string, int, string) ([]model.TransactionScheduleOccurrence, error) {
+	return []model.TransactionScheduleOccurrence{}, nil
+}
+func (*fakeAPI) ListBudgets(context.Context, int, bool) ([]model.Budget, error) {
+	return []model.Budget{}, nil
+}
+func (*fakeAPI) GetBudget(context.Context, int, int) (model.Budget, error) {
+	return model.Budget{ID: 1, Name: "Food"}, nil
+}
+func (*fakeAPI) CreateBudget(context.Context, int, model.BudgetRequest) (model.Budget, error) {
+	return model.Budget{ID: 1, Name: "Food"}, nil
+}
+func (*fakeAPI) UpdateBudget(context.Context, int, int, model.BudgetRequest) (model.Budget, error) {
+	return model.Budget{ID: 1, Name: "Food"}, nil
+}
+func (*fakeAPI) DeleteBudget(context.Context, int, int) error { return nil }
+func (*fakeAPI) GetNotificationPreferences(context.Context, int) (model.NotificationPreferences, error) {
+	return model.NotificationPreferences{Timezone: "Europe/Sofia"}, nil
+}
+func (*fakeAPI) UpdateNotificationPreferences(context.Context, int, model.NotificationPreferences) (model.NotificationPreferences, error) {
+	return model.NotificationPreferences{Timezone: "Europe/Sofia"}, nil
+}
+func (*fakeAPI) RegisterPushDevice(context.Context, int, model.PushDeviceRequest) (model.PushDevice, error) {
+	return model.PushDevice{ID: 1, Platform: "ios"}, nil
+}
+func (*fakeAPI) DeletePushDevice(context.Context, int, int) error { return nil }
+func (*fakeAPI) CreateInvestmentTrade(context.Context, int, model.InvestmentTradeRequest) (model.InvestmentTrade, error) {
+	return model.InvestmentTrade{ID: 1, Symbol: "BTC"}, nil
+}
+func (*fakeAPI) ListInvestmentTrades(context.Context, int, string, string, string, string, string) ([]model.InvestmentTrade, error) {
+	return []model.InvestmentTrade{}, nil
+}
+func (*fakeAPI) DeleteInvestmentTrade(context.Context, int, int) error { return nil }
+func (*fakeAPI) InvestmentPortfolio(context.Context, int) (model.InvestmentPortfolio, error) {
+	return model.InvestmentPortfolio{Positions: []model.InvestmentPosition{}, Currency: "EUR"}, nil
+}
+func (*fakeAPI) SetManualInvestmentPrice(context.Context, int, model.InvestmentPriceRequest) (model.InvestmentPrice, error) {
+	return model.InvestmentPrice{Symbol: "BTC", Price: "1.00"}, nil
+}
+func (*fakeAPI) ExportInvestmentTrades(context.Context, int, string, string) ([]model.InvestmentTrade, error) {
+	return []model.InvestmentTrade{}, nil
+}
+func (*fakeAPI) ListInvestmentSchedules(context.Context, int, string) ([]model.InvestmentSchedule, error) {
+	return []model.InvestmentSchedule{}, nil
+}
+func (*fakeAPI) CreateInvestmentSchedule(context.Context, int, model.InvestmentScheduleRequest) (model.InvestmentSchedule, error) {
+	return model.InvestmentSchedule{ID: 1, Symbol: "BTC", Status: "active"}, nil
+}
+func (*fakeAPI) GetInvestmentSchedule(context.Context, int, int) (model.InvestmentSchedule, error) {
+	return model.InvestmentSchedule{ID: 1, Symbol: "BTC", Status: "active"}, nil
+}
+func (*fakeAPI) UpdateInvestmentSchedule(context.Context, int, int, model.InvestmentScheduleRequest) (model.InvestmentSchedule, error) {
+	return model.InvestmentSchedule{ID: 1, Symbol: "BTC", Status: "active"}, nil
+}
+func (*fakeAPI) PauseInvestmentSchedule(context.Context, int, int) (model.InvestmentSchedule, error) {
+	return model.InvestmentSchedule{ID: 1, Symbol: "BTC", Status: "paused"}, nil
+}
+func (*fakeAPI) ResumeInvestmentSchedule(context.Context, int, int) (model.InvestmentSchedule, error) {
+	return model.InvestmentSchedule{ID: 1, Symbol: "BTC", Status: "active"}, nil
+}
+func (*fakeAPI) DeleteInvestmentSchedule(context.Context, int, int) error { return nil }
 func (f *fakeAPI) ListOpenBankingInstitutions(context.Context, string, string) ([]model.OpenBankingInstitution, error) {
 	if f.openBankingInstitutions == nil {
 		return []model.OpenBankingInstitution{}, nil
@@ -299,4 +416,7 @@ func (*fakeAPI) GetOpenBankingAccountBalances(context.Context, int, int, model.O
 }
 func (*fakeAPI) GetOpenBankingAccountTransactions(context.Context, int, int, string, string, string, string, string, model.OpenBankingPSUContext) (model.OpenBankingProviderData, error) {
 	return model.OpenBankingProviderData(`{"transactions":[]}`), nil
+}
+func (*fakeAPI) SyncOpenBankingAccount(context.Context, int, int, string, string, model.OpenBankingPSUContext) (model.OpenBankingSyncResult, error) {
+	return model.OpenBankingSyncResult{}, nil
 }

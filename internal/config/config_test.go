@@ -1,11 +1,14 @@
 package config
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -127,6 +130,52 @@ func TestLoadAcceptsBase64OpenBankingKey(t *testing.T) {
 	}
 }
 
+func TestLoadAcceptsBase64APNSKeyAndRejectsPartialConfiguration(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("DATABASE_URL", "postgres://money:money@localhost/money")
+	t.Setenv("JWT_SECRET", strings.Repeat("s", 32))
+	t.Setenv("APNS_KEY_ID", "ABCDEFGHIJ")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "configured together") {
+		t.Fatalf("partial APNs configuration error = %v", err)
+	}
+
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encodedPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: encoded})
+	t.Setenv("APNS_TEAM_ID", "KLMNOPQRST")
+	t.Setenv("APNS_BUNDLE_ID", "org.moneymanager.ios")
+	t.Setenv("APNS_PRIVATE_KEY_BASE64", base64.StdEncoding.EncodeToString(encodedPEM))
+
+	cfg, err := Load()
+	if err != nil || cfg.APNSPrivateKey == nil || cfg.APNSBundleID != "org.moneymanager.ios" {
+		t.Fatalf("base64 APNs configuration = %#v, %v", cfg, err)
+	}
+}
+
+func TestLoadAcceptsBase64FCMServiceAccount(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("DATABASE_URL", "postgres://money:money@localhost/money")
+	t.Setenv("JWT_SECRET", strings.Repeat("s", 32))
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privateKey)})
+	serviceAccount := `{"project_id":"money-manager","client_email":"push@money-manager.iam.gserviceaccount.com","private_key":` +
+		strconv.Quote(string(privateKeyPEM)) + `}`
+	t.Setenv("FCM_SERVICE_ACCOUNT_BASE64", base64.StdEncoding.EncodeToString([]byte(serviceAccount)))
+	cfg, err := Load()
+	if err != nil || cfg.FCMPrivateKey == nil || cfg.FCMProjectID != "money-manager" {
+		t.Fatalf("base64 FCM configuration = %#v, %v", cfg, err)
+	}
+}
+
 func clearConfigEnvironment(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
@@ -139,6 +188,8 @@ func clearConfigEnvironment(t *testing.T) {
 		"ENABLE_BANKING_PRIVATE_KEY_PATH", "ENABLE_BANKING_CALLBACK_URL",
 		"ENABLE_BANKING_RESULT_REDIRECT_URL", "ENABLE_BANKING_CONSENT_DAYS", "ENABLE_BANKING_STATE_TTL",
 		"ENABLE_BANKING_REQUEST_TIMEOUT",
+		"APNS_KEY_ID", "APNS_TEAM_ID", "APNS_BUNDLE_ID", "APNS_PRIVATE_KEY_BASE64", "APNS_REQUEST_TIMEOUT",
+		"FCM_SERVICE_ACCOUNT_BASE64", "FCM_REQUEST_TIMEOUT",
 	} {
 		t.Setenv(name, "")
 	}

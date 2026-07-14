@@ -44,6 +44,36 @@ type API interface {
 	UpdateTransaction(context.Context, int, int, model.TransactionRequest) (model.Transaction, error)
 	DeleteTransaction(context.Context, int, int) error
 	ImportRevolutCSV(context.Context, int, []byte) (model.ImportResult, error)
+	ListTransactionSchedules(context.Context, int, string) ([]model.TransactionSchedule, error)
+	CreateTransactionSchedule(context.Context, int, model.TransactionScheduleRequest) (model.TransactionSchedule, error)
+	GetTransactionSchedule(context.Context, int, int) (model.TransactionSchedule, error)
+	UpdateTransactionSchedule(context.Context, int, int, model.TransactionScheduleRequest) (model.TransactionSchedule, error)
+	PauseTransactionSchedule(context.Context, int, int) (model.TransactionSchedule, error)
+	ResumeTransactionSchedule(context.Context, int, int) (model.TransactionSchedule, error)
+	DeleteTransactionSchedule(context.Context, int, int) error
+	ListTransactionScheduleOccurrences(context.Context, int, string, string, int, string) ([]model.TransactionScheduleOccurrence, error)
+	ListBudgets(context.Context, int, bool) ([]model.Budget, error)
+	GetBudget(context.Context, int, int) (model.Budget, error)
+	CreateBudget(context.Context, int, model.BudgetRequest) (model.Budget, error)
+	UpdateBudget(context.Context, int, int, model.BudgetRequest) (model.Budget, error)
+	DeleteBudget(context.Context, int, int) error
+	GetNotificationPreferences(context.Context, int) (model.NotificationPreferences, error)
+	UpdateNotificationPreferences(context.Context, int, model.NotificationPreferences) (model.NotificationPreferences, error)
+	RegisterPushDevice(context.Context, int, model.PushDeviceRequest) (model.PushDevice, error)
+	DeletePushDevice(context.Context, int, int) error
+	CreateInvestmentTrade(context.Context, int, model.InvestmentTradeRequest) (model.InvestmentTrade, error)
+	ListInvestmentTrades(context.Context, int, string, string, string, string, string) ([]model.InvestmentTrade, error)
+	DeleteInvestmentTrade(context.Context, int, int) error
+	InvestmentPortfolio(context.Context, int) (model.InvestmentPortfolio, error)
+	SetManualInvestmentPrice(context.Context, int, model.InvestmentPriceRequest) (model.InvestmentPrice, error)
+	ExportInvestmentTrades(context.Context, int, string, string) ([]model.InvestmentTrade, error)
+	ListInvestmentSchedules(context.Context, int, string) ([]model.InvestmentSchedule, error)
+	CreateInvestmentSchedule(context.Context, int, model.InvestmentScheduleRequest) (model.InvestmentSchedule, error)
+	GetInvestmentSchedule(context.Context, int, int) (model.InvestmentSchedule, error)
+	UpdateInvestmentSchedule(context.Context, int, int, model.InvestmentScheduleRequest) (model.InvestmentSchedule, error)
+	PauseInvestmentSchedule(context.Context, int, int) (model.InvestmentSchedule, error)
+	ResumeInvestmentSchedule(context.Context, int, int) (model.InvestmentSchedule, error)
+	DeleteInvestmentSchedule(context.Context, int, int) error
 	ListOpenBankingInstitutions(context.Context, string, string) ([]model.OpenBankingInstitution, error)
 	StartOpenBankingAuthorization(context.Context, int, model.OpenBankingAuthorizationRequest) (model.OpenBankingAuthorization, error)
 	CompleteOpenBankingAuthorization(context.Context, model.OpenBankingCallbackRequest) (model.OpenBankingCallbackResult, error)
@@ -54,6 +84,7 @@ type API interface {
 	GetOpenBankingAccountDetails(context.Context, int, int, model.OpenBankingPSUContext) (model.OpenBankingProviderData, error)
 	GetOpenBankingAccountBalances(context.Context, int, int, model.OpenBankingPSUContext) (model.OpenBankingProviderData, error)
 	GetOpenBankingAccountTransactions(context.Context, int, int, string, string, string, string, string, model.OpenBankingPSUContext) (model.OpenBankingProviderData, error)
+	SyncOpenBankingAccount(context.Context, int, int, string, string, model.OpenBankingPSUContext) (model.OpenBankingSyncResult, error)
 }
 
 type Options struct {
@@ -289,6 +320,408 @@ func Build(api API, options Options) http.Handler {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
+	mux.HandleFunc("GET /schedules", func(w http.ResponseWriter, request *http.Request) {
+		userID, ok := authenticatedUser(w, request, api, options.Logger)
+		if !ok {
+			return
+		}
+		items, err := api.ListTransactionSchedules(request.Context(), userID, request.URL.Query().Get("status"))
+		writeJSONResult(w, request, options.Logger, http.StatusOK, items, err)
+	})
+	mux.HandleFunc("POST /schedules", func(w http.ResponseWriter, request *http.Request) {
+		userID, ok := authenticatedUser(w, request, api, options.Logger)
+		if !ok {
+			return
+		}
+		var payload model.TransactionScheduleRequest
+		if err := decodeJSON(w, request, &payload, options.RequestBodyLimit); err != nil {
+			writeError(w, request, options.Logger, err)
+			return
+		}
+		item, err := api.CreateTransactionSchedule(request.Context(), userID, payload)
+		writeJSONResult(w, request, options.Logger, http.StatusCreated, item, err)
+	})
+	mux.HandleFunc("GET /schedules/{id}", func(w http.ResponseWriter, request *http.Request) {
+		userID, ok := authenticatedUser(w, request, api, options.Logger)
+		if !ok {
+			return
+		}
+		scheduleID, err := parseID(request.PathValue("id"))
+		if err != nil {
+			writeError(w, request, options.Logger, err)
+			return
+		}
+		item, err := api.GetTransactionSchedule(request.Context(), userID, scheduleID)
+		writeJSONResult(w, request, options.Logger, http.StatusOK, item, err)
+	})
+	mux.HandleFunc("PUT /schedules/{id}", func(w http.ResponseWriter, request *http.Request) {
+		userID, ok := authenticatedUser(w, request, api, options.Logger)
+		if !ok {
+			return
+		}
+		scheduleID, err := parseID(request.PathValue("id"))
+		if err != nil {
+			writeError(w, request, options.Logger, err)
+			return
+		}
+		var payload model.TransactionScheduleRequest
+		if err := decodeJSON(w, request, &payload, options.RequestBodyLimit); err != nil {
+			writeError(w, request, options.Logger, err)
+			return
+		}
+		item, err := api.UpdateTransactionSchedule(request.Context(), userID, scheduleID, payload)
+		writeJSONResult(w, request, options.Logger, http.StatusOK, item, err)
+	})
+	mux.HandleFunc("POST /schedules/{id}/pause", func(w http.ResponseWriter, request *http.Request) {
+		userID, ok := authenticatedUser(w, request, api, options.Logger)
+		if !ok {
+			return
+		}
+		scheduleID, err := parseID(request.PathValue("id"))
+		if err != nil {
+			writeError(w, request, options.Logger, err)
+			return
+		}
+		item, err := api.PauseTransactionSchedule(request.Context(), userID, scheduleID)
+		writeJSONResult(w, request, options.Logger, http.StatusOK, item, err)
+	})
+	mux.HandleFunc("POST /schedules/{id}/resume", func(w http.ResponseWriter, request *http.Request) {
+		userID, ok := authenticatedUser(w, request, api, options.Logger)
+		if !ok {
+			return
+		}
+		scheduleID, err := parseID(request.PathValue("id"))
+		if err != nil {
+			writeError(w, request, options.Logger, err)
+			return
+		}
+		item, err := api.ResumeTransactionSchedule(request.Context(), userID, scheduleID)
+		writeJSONResult(w, request, options.Logger, http.StatusOK, item, err)
+	})
+	mux.HandleFunc("DELETE /schedules/{id}", func(w http.ResponseWriter, request *http.Request) {
+		userID, ok := authenticatedUser(w, request, api, options.Logger)
+		if !ok {
+			return
+		}
+		scheduleID, err := parseID(request.PathValue("id"))
+		if err == nil {
+			err = api.DeleteTransactionSchedule(request.Context(), userID, scheduleID)
+		}
+		if err != nil {
+			writeError(w, request, options.Logger, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("GET /schedule-occurrences", func(w http.ResponseWriter, request *http.Request) {
+		userID, ok := authenticatedUser(w, request, api, options.Logger)
+		if !ok {
+			return
+		}
+		query := request.URL.Query()
+		scheduleID := 0
+		var err error
+		if rawScheduleID := strings.TrimSpace(query.Get("schedule_id")); rawScheduleID != "" {
+			scheduleID, err = parseID(rawScheduleID)
+		}
+		if err != nil {
+			writeError(w, request, options.Logger, err)
+			return
+		}
+		items, err := api.ListTransactionScheduleOccurrences(
+			request.Context(), userID, query.Get("from"), query.Get("through"),
+			scheduleID, query.Get("status"),
+		)
+		writeJSONResult(w, request, options.Logger, http.StatusOK, items, err)
+	})
+
+	mux.HandleFunc("GET /budgets", func(w http.ResponseWriter, request *http.Request) {
+		userID, ok := authenticatedUser(w, request, api, options.Logger)
+		if !ok {
+			return
+		}
+		includeArchived := strings.EqualFold(request.URL.Query().Get("include_archived"), "true")
+		items, err := api.ListBudgets(request.Context(), userID, includeArchived)
+		writeJSONResult(w, request, options.Logger, http.StatusOK, items, err)
+	})
+	mux.HandleFunc("POST /budgets", func(w http.ResponseWriter, request *http.Request) {
+		userID, ok := authenticatedUser(w, request, api, options.Logger)
+		if !ok {
+			return
+		}
+		var payload model.BudgetRequest
+		if err := decodeJSON(w, request, &payload, options.RequestBodyLimit); err != nil {
+			writeError(w, request, options.Logger, err)
+			return
+		}
+		item, err := api.CreateBudget(request.Context(), userID, payload)
+		writeJSONResult(w, request, options.Logger, http.StatusCreated, item, err)
+	})
+	mux.HandleFunc("GET /budgets/{id}", func(w http.ResponseWriter, request *http.Request) {
+		userID, ok := authenticatedUser(w, request, api, options.Logger)
+		if !ok {
+			return
+		}
+		budgetID, err := parseID(request.PathValue("id"))
+		if err != nil {
+			writeError(w, request, options.Logger, err)
+			return
+		}
+		item, err := api.GetBudget(request.Context(), userID, budgetID)
+		writeJSONResult(w, request, options.Logger, http.StatusOK, item, err)
+	})
+	mux.HandleFunc("PUT /budgets/{id}", func(w http.ResponseWriter, request *http.Request) {
+		userID, ok := authenticatedUser(w, request, api, options.Logger)
+		if !ok {
+			return
+		}
+		budgetID, err := parseID(request.PathValue("id"))
+		if err != nil {
+			writeError(w, request, options.Logger, err)
+			return
+		}
+		var payload model.BudgetRequest
+		if err := decodeJSON(w, request, &payload, options.RequestBodyLimit); err != nil {
+			writeError(w, request, options.Logger, err)
+			return
+		}
+		item, err := api.UpdateBudget(request.Context(), userID, budgetID, payload)
+		writeJSONResult(w, request, options.Logger, http.StatusOK, item, err)
+	})
+	mux.HandleFunc("DELETE /budgets/{id}", func(w http.ResponseWriter, request *http.Request) {
+		userID, ok := authenticatedUser(w, request, api, options.Logger)
+		if !ok {
+			return
+		}
+		budgetID, err := parseID(request.PathValue("id"))
+		if err == nil {
+			err = api.DeleteBudget(request.Context(), userID, budgetID)
+		}
+		if err != nil {
+			writeError(w, request, options.Logger, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	mux.HandleFunc("GET /notification-preferences", func(w http.ResponseWriter, request *http.Request) {
+		userID, ok := authenticatedUser(w, request, api, options.Logger)
+		if !ok {
+			return
+		}
+		item, err := api.GetNotificationPreferences(request.Context(), userID)
+		writeJSONResult(w, request, options.Logger, http.StatusOK, item, err)
+	})
+	mux.HandleFunc("PUT /notification-preferences", func(w http.ResponseWriter, request *http.Request) {
+		userID, ok := authenticatedUser(w, request, api, options.Logger)
+		if !ok {
+			return
+		}
+		var payload model.NotificationPreferences
+		if err := decodeJSON(w, request, &payload, options.RequestBodyLimit); err != nil {
+			writeError(w, request, options.Logger, err)
+			return
+		}
+		item, err := api.UpdateNotificationPreferences(request.Context(), userID, payload)
+		writeJSONResult(w, request, options.Logger, http.StatusOK, item, err)
+	})
+	mux.HandleFunc("POST /push-devices", func(w http.ResponseWriter, request *http.Request) {
+		userID, ok := authenticatedUser(w, request, api, options.Logger)
+		if !ok {
+			return
+		}
+		var payload model.PushDeviceRequest
+		if err := decodeJSON(w, request, &payload, options.RequestBodyLimit); err != nil {
+			writeError(w, request, options.Logger, err)
+			return
+		}
+		item, err := api.RegisterPushDevice(request.Context(), userID, payload)
+		writeJSONResult(w, request, options.Logger, http.StatusCreated, item, err)
+	})
+	mux.HandleFunc("DELETE /push-devices/{id}", func(w http.ResponseWriter, request *http.Request) {
+		userID, ok := authenticatedUser(w, request, api, options.Logger)
+		if !ok {
+			return
+		}
+		deviceID, err := parseID(request.PathValue("id"))
+		if err == nil {
+			err = api.DeletePushDevice(request.Context(), userID, deviceID)
+		}
+		if err != nil {
+			writeError(w, request, options.Logger, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	mux.HandleFunc("GET /investments/portfolio", func(w http.ResponseWriter, request *http.Request) {
+		userID, ok := authenticatedUser(w, request, api, options.Logger)
+		if !ok {
+			return
+		}
+		item, err := api.InvestmentPortfolio(request.Context(), userID)
+		writeJSONResult(w, request, options.Logger, http.StatusOK, item, err)
+	})
+	mux.HandleFunc("GET /investments/trades", func(w http.ResponseWriter, request *http.Request) {
+		userID, ok := authenticatedUser(w, request, api, options.Logger)
+		if !ok {
+			return
+		}
+		query := request.URL.Query()
+		items, err := api.ListInvestmentTrades(request.Context(), userID, query.Get("from"), query.Get("through"),
+			query.Get("asset_type"), query.Get("symbol"), query.Get("broker"))
+		writeJSONResult(w, request, options.Logger, http.StatusOK, items, err)
+	})
+	mux.HandleFunc("POST /investments/trades", func(w http.ResponseWriter, request *http.Request) {
+		userID, ok := authenticatedUser(w, request, api, options.Logger)
+		if !ok {
+			return
+		}
+		var payload model.InvestmentTradeRequest
+		if err := decodeJSON(w, request, &payload, options.RequestBodyLimit); err != nil {
+			writeError(w, request, options.Logger, err)
+			return
+		}
+		item, err := api.CreateInvestmentTrade(request.Context(), userID, payload)
+		writeJSONResult(w, request, options.Logger, http.StatusCreated, item, err)
+	})
+	mux.HandleFunc("DELETE /investments/trades/{id}", func(w http.ResponseWriter, request *http.Request) {
+		userID, ok := authenticatedUser(w, request, api, options.Logger)
+		if !ok {
+			return
+		}
+		tradeID, err := parseID(request.PathValue("id"))
+		if err == nil {
+			err = api.DeleteInvestmentTrade(request.Context(), userID, tradeID)
+		}
+		if err != nil {
+			writeError(w, request, options.Logger, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("PUT /investments/prices", func(w http.ResponseWriter, request *http.Request) {
+		userID, ok := authenticatedUser(w, request, api, options.Logger)
+		if !ok {
+			return
+		}
+		var payload model.InvestmentPriceRequest
+		if err := decodeJSON(w, request, &payload, options.RequestBodyLimit); err != nil {
+			writeError(w, request, options.Logger, err)
+			return
+		}
+		item, err := api.SetManualInvestmentPrice(request.Context(), userID, payload)
+		writeJSONResult(w, request, options.Logger, http.StatusOK, item, err)
+	})
+	mux.HandleFunc("GET /investments/export", func(w http.ResponseWriter, request *http.Request) {
+		userID, ok := authenticatedUser(w, request, api, options.Logger)
+		if !ok {
+			return
+		}
+		from, through := request.URL.Query().Get("from"), request.URL.Query().Get("through")
+		items, err := api.ExportInvestmentTrades(request.Context(), userID, from, through)
+		if err != nil {
+			writeError(w, request, options.Logger, err)
+			return
+		}
+		contents, err := investmentTradesCSV(items)
+		if err != nil {
+			writeError(w, request, options.Logger, apperrors.Internal(fmt.Errorf("encode investment CSV: %w", err)))
+			return
+		}
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="money-manager-investments-%s-to-%s.csv"`, from, through))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(contents)
+	})
+
+	mux.HandleFunc("GET /investment-schedules", func(w http.ResponseWriter, request *http.Request) {
+		userID, ok := authenticatedUser(w, request, api, options.Logger)
+		if !ok {
+			return
+		}
+		items, err := api.ListInvestmentSchedules(request.Context(), userID, request.URL.Query().Get("status"))
+		writeJSONResult(w, request, options.Logger, http.StatusOK, items, err)
+	})
+	mux.HandleFunc("POST /investment-schedules", func(w http.ResponseWriter, request *http.Request) {
+		userID, ok := authenticatedUser(w, request, api, options.Logger)
+		if !ok {
+			return
+		}
+		var payload model.InvestmentScheduleRequest
+		if err := decodeJSON(w, request, &payload, options.RequestBodyLimit); err != nil {
+			writeError(w, request, options.Logger, err)
+			return
+		}
+		item, err := api.CreateInvestmentSchedule(request.Context(), userID, payload)
+		writeJSONResult(w, request, options.Logger, http.StatusCreated, item, err)
+	})
+	mux.HandleFunc("GET /investment-schedules/{id}", func(w http.ResponseWriter, request *http.Request) {
+		userID, ok := authenticatedUser(w, request, api, options.Logger)
+		if !ok {
+			return
+		}
+		id, err := parseID(request.PathValue("id"))
+		if err != nil {
+			writeError(w, request, options.Logger, err)
+			return
+		}
+		item, err := api.GetInvestmentSchedule(request.Context(), userID, id)
+		writeJSONResult(w, request, options.Logger, http.StatusOK, item, err)
+	})
+	mux.HandleFunc("PUT /investment-schedules/{id}", func(w http.ResponseWriter, request *http.Request) {
+		userID, ok := authenticatedUser(w, request, api, options.Logger)
+		if !ok {
+			return
+		}
+		id, err := parseID(request.PathValue("id"))
+		if err != nil {
+			writeError(w, request, options.Logger, err)
+			return
+		}
+		var payload model.InvestmentScheduleRequest
+		if err := decodeJSON(w, request, &payload, options.RequestBodyLimit); err != nil {
+			writeError(w, request, options.Logger, err)
+			return
+		}
+		item, err := api.UpdateInvestmentSchedule(request.Context(), userID, id, payload)
+		writeJSONResult(w, request, options.Logger, http.StatusOK, item, err)
+	})
+	for path, action := range map[string]func(context.Context, int, int) (model.InvestmentSchedule, error){
+		"POST /investment-schedules/{id}/pause":  api.PauseInvestmentSchedule,
+		"POST /investment-schedules/{id}/resume": api.ResumeInvestmentSchedule,
+	} {
+		action := action
+		mux.HandleFunc(path, func(w http.ResponseWriter, request *http.Request) {
+			userID, ok := authenticatedUser(w, request, api, options.Logger)
+			if !ok {
+				return
+			}
+			id, err := parseID(request.PathValue("id"))
+			if err != nil {
+				writeError(w, request, options.Logger, err)
+				return
+			}
+			item, err := action(request.Context(), userID, id)
+			writeJSONResult(w, request, options.Logger, http.StatusOK, item, err)
+		})
+	}
+	mux.HandleFunc("DELETE /investment-schedules/{id}", func(w http.ResponseWriter, request *http.Request) {
+		userID, ok := authenticatedUser(w, request, api, options.Logger)
+		if !ok {
+			return
+		}
+		id, err := parseID(request.PathValue("id"))
+		if err == nil {
+			err = api.DeleteInvestmentSchedule(request.Context(), userID, id)
+		}
+		if err != nil {
+			writeError(w, request, options.Logger, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
 	mux.HandleFunc("GET /api/open-banking/banks", func(w http.ResponseWriter, request *http.Request) {
 		if _, ok := authenticatedUser(w, request, api, options.Logger); !ok {
 			return
@@ -410,6 +843,18 @@ func Build(api API, options Options) http.Handler {
 		)
 		writeJSONResult(w, request, options.Logger, http.StatusOK, response, err)
 	})
+	mux.HandleFunc("POST /api/open-banking/accounts/{id}/sync", func(w http.ResponseWriter, request *http.Request) {
+		userID, accountID, ok := authenticatedOpenBankingAccount(w, request, api, options.Logger)
+		if !ok {
+			return
+		}
+		query := request.URL.Query()
+		result, err := api.SyncOpenBankingAccount(
+			request.Context(), userID, accountID, query.Get("date_from"), query.Get("date_to"),
+			openBankingPSUContext(request, options),
+		)
+		writeJSONResult(w, request, options.Logger, http.StatusOK, result, err)
+	})
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, request *http.Request) {
 		writeError(w, request, options.Logger, apperrors.NotFound("endpoint not found"))
@@ -498,7 +943,7 @@ func parseID(value string) (int, error) {
 func transactionsCSV(transactions []model.Transaction) ([]byte, error) {
 	var buffer bytes.Buffer
 	writer := csv.NewWriter(&buffer)
-	if err := writer.Write([]string{"occurred_at", "type", "category", "description", "amount", "currency"}); err != nil {
+	if err := writer.Write([]string{"occurred_at", "type", "category", "description", "amount", "currency", "source", "status", "excluded_from_budget"}); err != nil {
 		return nil, err
 	}
 	for _, transaction := range transactions {
@@ -509,6 +954,33 @@ func transactionsCSV(transactions []model.Transaction) ([]byte, error) {
 			transaction.Description,
 			transaction.Amount,
 			transaction.Currency,
+			transaction.Source,
+			transaction.Status,
+			strconv.FormatBool(transaction.ExcludedFromBudget),
+		}); err != nil {
+			return nil, err
+		}
+	}
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		return nil, err
+	}
+	return buffer.Bytes(), nil
+}
+
+func investmentTradesCSV(trades []model.InvestmentTrade) ([]byte, error) {
+	var buffer bytes.Buffer
+	writer := csv.NewWriter(&buffer)
+	if err := writer.Write([]string{
+		"occurred_at", "asset_type", "symbol", "asset_name", "broker", "side",
+		"quantity", "price_per_unit", "fees", "currency", "notes",
+	}); err != nil {
+		return nil, err
+	}
+	for _, trade := range trades {
+		if err := writer.Write([]string{
+			trade.OccurredAt, trade.AssetType, trade.Symbol, trade.AssetName, trade.Broker,
+			trade.Side, trade.Quantity, trade.PricePerUnit, trade.Fees, trade.Currency, trade.Notes,
 		}); err != nil {
 			return nil, err
 		}

@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/mail"
 	"strconv"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"money-manager-server/internal/apperrors"
 	"money-manager-server/internal/config"
 	"money-manager-server/internal/model"
+	"money-manager-server/internal/push"
 	"money-manager-server/internal/repository"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -55,6 +57,42 @@ type Store interface {
 	UpdateTransaction(context.Context, int, int, model.TransactionRequest) (model.Transaction, error)
 	DeleteTransaction(context.Context, int, int) error
 	Summary(context.Context, int, string, time.Time, time.Time) (model.Summary, error)
+	CreateTransactionSchedule(context.Context, int, model.TransactionScheduleRequest) (model.TransactionSchedule, error)
+	ListTransactionSchedules(context.Context, int, string, time.Time) ([]model.TransactionSchedule, error)
+	GetTransactionSchedule(context.Context, int, int, time.Time) (model.TransactionSchedule, error)
+	UpdateTransactionSchedule(context.Context, int, int, model.TransactionScheduleRequest, time.Time) (model.TransactionSchedule, error)
+	SetTransactionScheduleStatus(context.Context, int, int, string) error
+	ArchiveTransactionSchedule(context.Context, int, int) error
+	ListActiveTransactionSchedules(context.Context) ([]model.TransactionSchedule, error)
+	UpsertTransactionScheduleOccurrences(context.Context, []repository.ScheduleOccurrenceSeed) (int, error)
+	MarkTransactionScheduleMaterializedThrough(context.Context, int, time.Time) error
+	ListTransactionScheduleOccurrences(context.Context, int, repository.ScheduleOccurrenceFilter) ([]model.TransactionScheduleOccurrence, error)
+	PostDueTransactionScheduleOccurrences(context.Context, time.Time, int) (int, error)
+	QueueDueTransactionScheduleReminders(context.Context, time.Time, int) (int, error)
+	ListBudgets(context.Context, int, time.Time, bool) ([]model.Budget, error)
+	GetBudget(context.Context, int, int, time.Time) (model.Budget, error)
+	CreateBudget(context.Context, int, model.BudgetRequest, time.Time) (model.Budget, error)
+	UpdateBudget(context.Context, int, int, model.BudgetRequest, time.Time) (model.Budget, error)
+	ArchiveBudget(context.Context, int, int) error
+	QueueBudgetAlerts(context.Context, time.Time) (int, error)
+	GetNotificationPreferences(context.Context, int) (model.NotificationPreferences, error)
+	UpdateNotificationPreferences(context.Context, int, model.NotificationPreferences) (model.NotificationPreferences, error)
+	RegisterPushDevice(context.Context, int, model.PushDeviceRequest) (model.PushDevice, error)
+	DeactivatePushDevice(context.Context, int, int) error
+	CreateInvestmentTrade(context.Context, int, model.InvestmentTradeRequest) (model.InvestmentTrade, error)
+	ListInvestmentTrades(context.Context, int, repository.InvestmentTradeFilter) ([]model.InvestmentTrade, error)
+	DeleteInvestmentTrade(context.Context, int, int) error
+	InvestmentHoldingQuantity(context.Context, int, string, string, string) (string, error)
+	ListInvestmentPrices(context.Context) ([]model.InvestmentPrice, error)
+	UpsertManualInvestmentPrice(context.Context, int, model.InvestmentPriceRequest, time.Time) (model.InvestmentPrice, error)
+	CreateInvestmentSchedule(context.Context, int, model.InvestmentScheduleRequest) (model.InvestmentSchedule, error)
+	ListInvestmentSchedules(context.Context, int, string) ([]model.InvestmentSchedule, error)
+	GetInvestmentSchedule(context.Context, int, int) (model.InvestmentSchedule, error)
+	UpdateInvestmentSchedule(context.Context, int, int, model.InvestmentScheduleRequest) (model.InvestmentSchedule, error)
+	SetInvestmentScheduleStatus(context.Context, int, int, string) error
+	ArchiveInvestmentSchedule(context.Context, int, int) error
+	ListActiveInvestmentSchedules(context.Context) ([]model.InvestmentSchedule, error)
+	QueueInvestmentReminder(context.Context, model.InvestmentSchedule, time.Time) (bool, error)
 	CreateOpenBankingAuthorization(context.Context, repository.NewOpenBankingAuthorization) (int, error)
 	SetOpenBankingAuthorizationProviderID(context.Context, int, string) error
 	ClaimOpenBankingAuthorization(context.Context, string, time.Time) (repository.OpenBankingAuthorizationRecord, error)
@@ -67,6 +105,11 @@ type Store interface {
 	ListOpenBankingAccounts(context.Context, int) ([]model.OpenBankingAccount, error)
 	GetOpenBankingAccount(context.Context, int, int) (repository.OpenBankingAccountRecord, error)
 	ListOpenBankingProviderSessions(context.Context, int) ([]string, error)
+	ImportOpenBankingTransactions(context.Context, int, int, []repository.OpenBankingTransactionSeed, time.Time) (model.OpenBankingSyncResult, error)
+	ClaimOpenBankingAccountsForSync(context.Context, time.Time, time.Time, time.Time, int) ([]repository.OpenBankingSyncAccount, error)
+	ReleaseOpenBankingSyncClaim(context.Context, int) error
+	ClaimNotificationDeliveries(context.Context, time.Time, time.Time, []string, int) ([]repository.NotificationDelivery, error)
+	CompleteNotificationDelivery(context.Context, int, bool, bool, bool, string, time.Time, time.Time) error
 }
 
 func (s *Service) ImportRevolutCSV(ctx context.Context, userID int, contents []byte) (model.ImportResult, error) {
@@ -214,16 +257,24 @@ func parseRevolutDate(value string) (time.Time, error) {
 }
 
 type Service struct {
-	store             Store
-	secret            []byte
-	issuer            string
-	audience          string
-	tokenTTL          time.Duration
-	legacyAcceptUntil time.Time
-	now               func() time.Time
-	openBanking       openBankingClient
-	openBankingConfig openBankingServiceConfig
-	openBankingError  error
+	store               Store
+	secret              []byte
+	issuer              string
+	audience            string
+	tokenTTL            time.Duration
+	legacyAcceptUntil   time.Time
+	now                 func() time.Time
+	openBanking         openBankingClient
+	openBankingConfig   openBankingServiceConfig
+	openBankingError    error
+	pushSenders         map[string]notificationSender
+	pushPlatforms       []string
+	pushError           error
+	scheduleHorizonDays int
+}
+
+type notificationSender interface {
+	Send(context.Context, push.Notification) (push.Result, error)
 }
 
 type tokenClaims struct {
@@ -255,16 +306,46 @@ func New(ctx context.Context, cfg config.Config) (*Service, error) {
 
 func NewWithStore(store Store, cfg config.Config) *Service {
 	result := &Service{
-		store:             store,
-		secret:            []byte(cfg.JWTSecret),
-		issuer:            cfg.JWTIssuer,
-		audience:          cfg.JWTAudience,
-		tokenTTL:          cfg.JWTTTL,
-		legacyAcceptUntil: cfg.JWTLegacyAcceptUntil,
-		now:               time.Now,
+		store:               store,
+		secret:              []byte(cfg.JWTSecret),
+		issuer:              cfg.JWTIssuer,
+		audience:            cfg.JWTAudience,
+		tokenTTL:            cfg.JWTTTL,
+		legacyAcceptUntil:   cfg.JWTLegacyAcceptUntil,
+		now:                 time.Now,
+		scheduleHorizonDays: 90,
 	}
 	result.configureOpenBanking(cfg)
+	result.configurePush(cfg)
 	return result
+}
+
+func (s *Service) configurePush(cfg config.Config) {
+	s.pushSenders = make(map[string]notificationSender)
+	if cfg.APNSPrivateKey != nil {
+		client, err := push.NewAPNSClient(push.APNSConfig{
+			KeyID: cfg.APNSKeyID, TeamID: cfg.APNSTeamID, BundleID: cfg.APNSBundleID,
+			PrivateKey: cfg.APNSPrivateKey, HTTPClient: &http.Client{Timeout: cfg.APNSRequestTimeout},
+		})
+		if err != nil {
+			s.pushError = errors.Join(s.pushError, err)
+		} else {
+			s.pushSenders["ios"] = client
+			s.pushPlatforms = append(s.pushPlatforms, "ios")
+		}
+	}
+	if cfg.FCMPrivateKey != nil {
+		client, err := push.NewFCMClient(push.FCMConfig{
+			ProjectID: cfg.FCMProjectID, ClientEmail: cfg.FCMClientEmail,
+			PrivateKey: cfg.FCMPrivateKey, HTTPClient: &http.Client{Timeout: cfg.FCMRequestTimeout},
+		})
+		if err != nil {
+			s.pushError = errors.Join(s.pushError, err)
+		} else {
+			s.pushSenders["android"] = client
+			s.pushPlatforms = append(s.pushPlatforms, "android")
+		}
+	}
 }
 
 func (s *Service) Close() { s.store.Close() }
@@ -683,6 +764,7 @@ func (s *Service) validateTransaction(ctx context.Context, userID int, request m
 	return model.TransactionRequest{
 		Type: transactionType, Category: canonicalCategory, Description: description,
 		Amount: amount, Currency: currency, OccurredAt: date.Format("2006-01-02"),
+		ExcludedFromBudget: request.ExcludedFromBudget,
 	}, nil
 }
 
