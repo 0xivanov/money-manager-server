@@ -188,51 +188,21 @@ func (s *Service) validateInvestmentSchedule(
 		}
 		endDate = end.Format("2006-01-02")
 	}
-	frequency := strings.ToLower(strings.TrimSpace(request.Frequency))
-	if frequency != "daily" && frequency != "weekly" && frequency != "monthly" {
-		return model.InvestmentScheduleRequest{}, apperrors.Validation("frequency must be daily, weekly, or monthly")
-	}
-	interval := request.FrequencyInterval
-	if interval == 0 {
-		interval = 1
-	}
-	if interval < 1 || interval > maximumScheduleInterval {
-		return model.InvestmentScheduleRequest{}, apperrors.Validation("frequency_interval must be between 1 and 365")
-	}
-	dayOfWeek, dayOfMonth := request.DayOfWeek, request.DayOfMonth
-	switch frequency {
-	case "daily":
-		if dayOfWeek != nil || dayOfMonth != nil {
-			return model.InvestmentScheduleRequest{}, apperrors.Validation("daily schedules cannot set day_of_week or day_of_month")
-		}
-	case "weekly":
-		if dayOfMonth != nil {
-			return model.InvestmentScheduleRequest{}, apperrors.Validation("weekly schedules cannot set day_of_month")
-		}
-		if dayOfWeek == nil {
-			value := isoWeekday(start)
-			dayOfWeek = &value
-		}
-		if *dayOfWeek < 1 || *dayOfWeek > 7 {
-			return model.InvestmentScheduleRequest{}, apperrors.Validation("day_of_week must be between 1 and 7")
-		}
-	case "monthly":
-		if dayOfWeek != nil {
-			return model.InvestmentScheduleRequest{}, apperrors.Validation("monthly schedules cannot set day_of_week")
-		}
-		if dayOfMonth == nil {
-			value := start.Day()
-			dayOfMonth = &value
-		}
-		if *dayOfMonth < 1 || *dayOfMonth > 31 {
-			return model.InvestmentScheduleRequest{}, apperrors.Validation("day_of_month must be between 1 and 31")
-		}
+	recurrence, err := normalizeScheduleRecurrence(
+		start,
+		request.Frequency,
+		request.FrequencyInterval,
+		request.DayOfWeek,
+		request.DayOfMonth,
+	)
+	if err != nil {
+		return model.InvestmentScheduleRequest{}, err
 	}
 	return model.InvestmentScheduleRequest{
 		AssetType: assetType, Symbol: symbol, AssetName: assetName, Broker: broker,
-		Amount: amount, Currency: currency, Frequency: frequency, FrequencyInterval: interval,
-		StartDate: start.Format("2006-01-02"), EndDate: endDate, DayOfWeek: dayOfWeek,
-		DayOfMonth: dayOfMonth, Timezone: timezone,
+		Amount: amount, Currency: currency, Frequency: recurrence.frequency, FrequencyInterval: recurrence.interval,
+		StartDate: start.Format("2006-01-02"), EndDate: endDate, DayOfWeek: recurrence.dayOfWeek,
+		DayOfMonth: recurrence.dayOfMonth, Timezone: timezone,
 	}, nil
 }
 

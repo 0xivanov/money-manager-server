@@ -126,6 +126,48 @@ func TestCompleteOpenBankingAuthorizationStoresOwnedSessionAndAccounts(t *testin
 	}
 }
 
+func TestCompleteOpenBankingAuthorizationBoundsDetachedSessionCleanup(t *testing.T) {
+	state := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+	cleanupCalled := false
+	client := &fakeOpenBankingClient{
+		authorizeSession: func(context.Context, string) (enablebanking.AuthorizeSessionResponse, error) {
+			return enablebanking.AuthorizeSessionResponse{SessionID: "provider-session"}, nil
+		},
+		deleteSession: func(ctx context.Context, sessionID string, _ enablebanking.PSUHeaders) error {
+			cleanupCalled = true
+			if sessionID != "provider-session" {
+				t.Fatalf("session ID = %q", sessionID)
+			}
+			if ctx.Err() != nil {
+				t.Fatalf("cleanup inherited request cancellation: %v", ctx.Err())
+			}
+			deadline, ok := ctx.Deadline()
+			if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > time.Second {
+				t.Fatalf("cleanup deadline = %s, present=%v", deadline, ok)
+			}
+			return nil
+		},
+	}
+	store := &fakeStore{
+		claimOpenBankingAuthorization: func(context.Context, string, time.Time) (repository.OpenBankingAuthorizationRecord, error) {
+			return repository.OpenBankingAuthorizationRecord{ID: 3, UserID: 7}, nil
+		},
+		storeOpenBankingConnection: func(context.Context, repository.NewOpenBankingConnection) (int, error) {
+			return 0, errors.New("database unavailable")
+		},
+	}
+	service := openBankingTestService(store, client, time.Now().UTC())
+	service.openBankingConfig.requestTimeout = time.Second
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := service.CompleteOpenBankingAuthorization(ctx, model.OpenBankingCallbackRequest{
+		State: state, Code: "authorization-code",
+	})
+	if err == nil || !cleanupCalled {
+		t.Fatalf("cleanup called=%v, error=%v", cleanupCalled, err)
+	}
+}
+
 func TestCompleteOpenBankingAuthorizationConsumesCancelledStateWithoutSessionExchange(t *testing.T) {
 	state := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
 	failed := false
