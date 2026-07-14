@@ -246,6 +246,83 @@ func TestTransactionScheduleEndpointsRequireAuthenticationAndReturnState(t *test
 	}
 }
 
+func TestProtectedRouteInventoryRequiresAuthentication(t *testing.T) {
+	handler := testHandler(&fakeAPI{}, Options{})
+	routes := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/me"},
+		{http.MethodDelete, "/me"},
+		{http.MethodGet, "/categories"},
+		{http.MethodPost, "/categories"},
+		{http.MethodDelete, "/categories/1"},
+		{http.MethodGet, "/transactions"},
+		{http.MethodGet, "/transactions/export"},
+		{http.MethodPost, "/transactions/import/revolut"},
+		{http.MethodGet, "/transactions/summary"},
+		{http.MethodPost, "/transactions"},
+		{http.MethodPut, "/transactions/1"},
+		{http.MethodDelete, "/transactions/1"},
+		{http.MethodGet, "/schedules"},
+		{http.MethodPost, "/schedules"},
+		{http.MethodGet, "/schedules/1"},
+		{http.MethodPut, "/schedules/1"},
+		{http.MethodPost, "/schedules/1/pause"},
+		{http.MethodPost, "/schedules/1/resume"},
+		{http.MethodDelete, "/schedules/1"},
+		{http.MethodGet, "/schedule-occurrences"},
+		{http.MethodGet, "/budgets"},
+		{http.MethodPost, "/budgets"},
+		{http.MethodGet, "/budgets/1"},
+		{http.MethodPut, "/budgets/1"},
+		{http.MethodDelete, "/budgets/1"},
+		{http.MethodGet, "/notification-preferences"},
+		{http.MethodPut, "/notification-preferences"},
+		{http.MethodPost, "/push-devices"},
+		{http.MethodDelete, "/push-devices/1"},
+		{http.MethodGet, "/investments/portfolio"},
+		{http.MethodGet, "/investments/trades"},
+		{http.MethodPost, "/investments/trades"},
+		{http.MethodDelete, "/investments/trades/1"},
+		{http.MethodPut, "/investments/prices"},
+		{http.MethodGet, "/investments/export"},
+		{http.MethodGet, "/investment-schedules"},
+		{http.MethodPost, "/investment-schedules"},
+		{http.MethodGet, "/investment-schedules/1"},
+		{http.MethodPut, "/investment-schedules/1"},
+		{http.MethodPost, "/investment-schedules/1/pause"},
+		{http.MethodPost, "/investment-schedules/1/resume"},
+		{http.MethodDelete, "/investment-schedules/1"},
+		{http.MethodGet, "/api/open-banking/banks"},
+		{http.MethodPost, "/api/open-banking/authorizations"},
+		{http.MethodGet, "/api/open-banking/connections"},
+		{http.MethodGet, "/api/open-banking/connections/1"},
+		{http.MethodDelete, "/api/open-banking/connections/1"},
+		{http.MethodGet, "/api/open-banking/accounts"},
+		{http.MethodGet, "/api/open-banking/accounts/1/details"},
+		{http.MethodGet, "/api/open-banking/accounts/1/balances"},
+		{http.MethodGet, "/api/open-banking/accounts/1/transactions"},
+		{http.MethodPost, "/api/open-banking/accounts/1/sync"},
+	}
+
+	for _, route := range routes {
+		t.Run(route.method+" "+route.path, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(route.method, route.path, nil))
+			if response.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+			}
+		})
+	}
+
+	unsupported := httptest.NewRecorder()
+	handler.ServeHTTP(unsupported, httptest.NewRequest(http.MethodPatch, "/budgets", nil))
+	if unsupported.Code != http.StatusNotFound {
+		t.Fatalf("unsupported method status = %d, body = %s", unsupported.Code, unsupported.Body.String())
+	}
+}
+
 func testHandler(api API, options Options) http.Handler {
 	options.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	return Build(api, options)

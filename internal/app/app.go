@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"money-manager-server/internal/config"
-	"money-manager-server/internal/model"
 	"money-manager-server/internal/router"
 	"money-manager-server/internal/service"
 )
@@ -52,9 +51,13 @@ func Run() error {
 
 	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
-	go runScheduledTransactionWorker(signalCtx, svc, logger, time.Minute)
-	go runOpenBankingSyncWorker(signalCtx, svc, logger, 5*time.Minute)
-	go runNotificationDeliveryWorker(signalCtx, svc, logger, 30*time.Second)
+	workers := startMaintenanceWorkers(signalCtx, svc, logger, maintenanceIntervals{
+		scheduledTransactions: time.Minute,
+		openBankingSync:       5 * time.Minute,
+		notificationDelivery:  30 * time.Second,
+	})
+	// This defer is registered after svc.Close, so workers always join before the store closes.
+	defer workers.Stop()
 	serverErrors := make(chan error, 1)
 	go func() {
 		logger.Info("server listening", "address", server.Addr)
@@ -86,141 +89,7 @@ func Run() error {
 	case <-time.After(time.Second):
 		return errors.New("HTTP server did not stop after shutdown")
 	}
+	workers.Stop()
 	logger.Info("server stopped")
 	return nil
-}
-
-type scheduledTransactionMaintainer interface {
-	RunScheduledTransactionMaintenance(context.Context) (model.ScheduleMaintenanceResult, error)
-}
-
-type openBankingSyncMaintainer interface {
-	RunOpenBankingSyncMaintenance(context.Context) (model.OpenBankingMaintenanceResult, error)
-}
-
-type notificationDeliveryMaintainer interface {
-	RunNotificationDeliveryMaintenance(context.Context) (model.NotificationDeliveryResult, error)
-}
-
-func runNotificationDeliveryWorker(
-	ctx context.Context,
-	maintainer notificationDeliveryMaintainer,
-	logger *slog.Logger,
-	interval time.Duration,
-) {
-	run := func() {
-		runCtx, cancel := context.WithTimeout(ctx, min(interval, 25*time.Second))
-		defer cancel()
-		result, err := maintainer.RunNotificationDeliveryMaintenance(runCtx)
-		if err != nil {
-			if ctx.Err() == nil {
-				logger.ErrorContext(ctx, "notification delivery failed", "error", err,
-					"claimed", result.Claimed, "sent", result.Sent,
-					"retrying", result.Retrying, "dead", result.Dead,
-				)
-			}
-			return
-		}
-		if result.Claimed > 0 {
-			logger.InfoContext(ctx, "notification delivery completed",
-				"claimed", result.Claimed, "sent", result.Sent,
-				"retrying", result.Retrying, "dead", result.Dead,
-				"deactivated", result.Deactivated,
-			)
-		}
-	}
-	run()
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			run()
-		}
-	}
-}
-
-func runOpenBankingSyncWorker(
-	ctx context.Context,
-	maintainer openBankingSyncMaintainer,
-	logger *slog.Logger,
-	interval time.Duration,
-) {
-	run := func() {
-		runCtx, cancel := context.WithTimeout(ctx, min(interval, 4*time.Minute))
-		defer cancel()
-		result, err := maintainer.RunOpenBankingSyncMaintenance(runCtx)
-		if err != nil {
-			if ctx.Err() == nil {
-				logger.ErrorContext(ctx, "open banking background sync failed",
-					"error", err,
-					"claimed", result.Claimed,
-					"succeeded", result.Succeeded,
-					"failed", result.Failed,
-				)
-			}
-			return
-		}
-		if result.Claimed > 0 {
-			logger.InfoContext(ctx, "open banking background sync completed",
-				"claimed", result.Claimed,
-				"succeeded", result.Succeeded,
-				"imported", result.Imported,
-				"updated", result.Updated,
-				"notifications", result.Notifications,
-			)
-		}
-	}
-	run()
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			run()
-		}
-	}
-}
-
-func runScheduledTransactionWorker(
-	ctx context.Context,
-	maintainer scheduledTransactionMaintainer,
-	logger *slog.Logger,
-	interval time.Duration,
-) {
-	run := func() {
-		runCtx, cancel := context.WithTimeout(ctx, min(interval, 45*time.Second))
-		defer cancel()
-		result, err := maintainer.RunScheduledTransactionMaintenance(runCtx)
-		if err != nil {
-			if ctx.Err() == nil {
-				logger.ErrorContext(ctx, "scheduled transaction maintenance failed", "error", err)
-			}
-			return
-		}
-		if result.Materialized > 0 || result.Posted > 0 || result.ScheduleReminders > 0 || result.BudgetAlerts > 0 || result.InvestmentReminders > 0 {
-			logger.InfoContext(ctx, "scheduled transaction maintenance completed",
-				"materialized", result.Materialized,
-				"posted", result.Posted,
-				"schedule_reminders", result.ScheduleReminders,
-				"budget_alerts", result.BudgetAlerts,
-				"investment_reminders", result.InvestmentReminders,
-			)
-		}
-	}
-	run()
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			run()
-		}
-	}
 }
