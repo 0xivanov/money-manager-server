@@ -81,6 +81,7 @@ type investmentAPI interface {
 	ListInvestmentTrades(context.Context, int, string, string, string, string, string) ([]model.InvestmentTrade, error)
 	DeleteInvestmentTrade(context.Context, int, int) error
 	InvestmentPortfolio(context.Context, int) (model.InvestmentPortfolio, error)
+	InvestmentPortfolioHistory(context.Context, int, string) (model.InvestmentPortfolioHistory, error)
 	SetManualInvestmentPrice(context.Context, int, model.InvestmentPriceRequest) (model.InvestmentPrice, error)
 	ExportInvestmentTrades(context.Context, int, string, string) ([]model.InvestmentTrade, error)
 	ListInvestmentSchedules(context.Context, int, string) ([]model.InvestmentSchedule, error)

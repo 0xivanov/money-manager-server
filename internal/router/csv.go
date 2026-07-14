@@ -41,14 +41,16 @@ func investmentTradesCSV(trades []model.InvestmentTrade) ([]byte, error) {
 	writer := csv.NewWriter(&buffer)
 	if err := writer.Write([]string{
 		"occurred_at", "asset_type", "symbol", "asset_name", "broker", "side",
-		"quantity", "price_per_unit", "fees", "currency", "notes",
+		"amount", "quantity", "price_per_unit", "price_provider", "price_as_of",
+		"fees", "currency", "notes",
 	}); err != nil {
 		return nil, err
 	}
 	for _, trade := range trades {
 		if err := writer.Write([]string{
 			trade.OccurredAt, trade.AssetType, trade.Symbol, trade.AssetName, trade.Broker,
-			trade.Side, trade.Quantity, trade.PricePerUnit, trade.Fees, trade.Currency, trade.Notes,
+			trade.Side, trade.Amount, trade.Quantity, trade.PricePerUnit, trade.PriceProvider,
+			trade.PriceAsOf, trade.Fees, trade.Currency, trade.Notes,
 		}); err != nil {
 			return nil, err
 		}

@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"math/big"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -166,8 +165,8 @@ type enableBankingTransactionsPage struct {
 }
 
 type enableBankingTransaction struct {
-	EntryReference       string `json:"entry_reference"`
-	MerchantCategoryCode string `json:"merchant_category_code"`
+	EntryReference       string          `json:"entry_reference"`
+	MerchantCategoryCode json.RawMessage `json:"merchant_category_code"`
 	TransactionAmount    struct {
 		Currency string `json:"currency"`
 		Amount   string `json:"amount"`
@@ -236,8 +235,11 @@ func normalizeOpenBankingTransaction(
 	}
 	status := openBankingTransactionStatus(transaction.Status)
 	description := openBankingTransactionDescription(transaction, transactionType)
-	category := openBankingTransactionCategory(
-		transactionType, transaction.MerchantCategoryCode, description,
+	merchantCategoryCode := openBankingMerchantCategoryCode(transaction.MerchantCategoryCode)
+	classification := classifyOpenBankingTransaction(
+		transactionType,
+		merchantCategoryCode,
+		openBankingTransactionClassificationText(transaction, description),
 	)
 	// Enable Banking documents entry_reference as stable across transaction-list
 	// retrievals. transaction_id is only a detail lookup key and may change.
@@ -253,21 +255,52 @@ func normalizeOpenBankingTransaction(
 		sum := sha256.Sum256([]byte(externalID))
 		externalID = "hashed:" + hex.EncodeToString(sum[:])
 	}
-	metadata, err := json.Marshal(map[string]string{
+	metadata, err := json.Marshal(map[string]any{
 		"provider_status":          strings.ToUpper(strings.TrimSpace(transaction.Status)),
 		"entry_reference":          truncateBytes(strings.TrimSpace(transaction.EntryReference), 500),
-		"merchant_category_code":   truncateBytes(strings.TrimSpace(transaction.MerchantCategoryCode), 20),
+		"merchant_category_code":   truncateBytes(merchantCategoryCode, 20),
 		"bank_transaction_code":    truncateBytes(strings.TrimSpace(transaction.BankTransactionCode.Code), 40),
 		"bank_transaction_subcode": truncateBytes(strings.TrimSpace(transaction.BankTransactionCode.SubCode), 40),
+		"classification_source":    classification.Source,
+		"classified_category":      classification.Category,
+		"classified_type":          transactionType,
+		"category_source":          classification.Source,
 	})
 	if err != nil {
 		return repository.OpenBankingTransactionSeed{}, false
 	}
 	return repository.OpenBankingTransactionSeed{
-		ExternalID: externalID, Type: transactionType, Category: category,
+		ExternalID: externalID, Type: transactionType, Category: classification.Category,
 		Description: description, Amount: amount, Currency: currency,
 		OccurredAt: occurredAt, Status: status, Metadata: metadata,
 	}, true
+}
+
+func openBankingMerchantCategoryCode(raw json.RawMessage) string {
+	value := strings.TrimSpace(string(raw))
+	if value == "" || value == "null" {
+		return ""
+	}
+	if strings.HasPrefix(value, `"`) {
+		var decoded string
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			return ""
+		}
+		value = strings.TrimSpace(decoded)
+	} else {
+		var decoded json.Number
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			return ""
+		}
+		value = decoded.String()
+	}
+	if number, ok := new(big.Rat).SetString(value); ok && number.Denom().Cmp(big.NewInt(1)) == 0 && number.Num().IsInt64() {
+		code := number.Num().Int64()
+		if code >= 0 && code <= 9999 {
+			return fmt.Sprintf("%04d", code)
+		}
+	}
+	return value
 }
 
 func firstValidOpenBankingDate(values ...string) time.Time {
@@ -311,39 +344,11 @@ func openBankingTransactionDescription(transaction enableBankingTransaction, tra
 	return "Bank transaction"
 }
 
-func openBankingTransactionCategory(transactionType, mcc, description string) string {
-	if transactionType == "income" {
-		lower := strings.ToLower(description)
-		if strings.Contains(lower, "salary") || strings.Contains(lower, "payroll") {
-			return "salary"
-		}
-		if strings.Contains(lower, "refund") || strings.Contains(lower, "reversal") {
-			return "refund"
-		}
-		return "other"
-	}
-	code, _ := strconv.Atoi(strings.TrimSpace(mcc))
-	switch {
-	case code == 5411 || code >= 5811 && code <= 5814:
-		return "food"
-	case code == 4111 || code == 4121 || code == 4131 || code == 4789 ||
-		code == 5541 || code == 5542 || code == 7523:
-		return "transport"
-	case code == 4900 || code == 4814 || code == 4899:
-		return "utilities"
-	case code == 6513:
-		return "housing"
-	case code == 5912 || code >= 8011 && code <= 8099:
-		return "health"
-	case code == 7832 || code == 7922 || code >= 7991 && code <= 7999:
-		return "entertainment"
-	case code >= 3000 && code <= 3999 || code == 4511 || code == 4722 || code == 7011:
-		return "travel"
-	case code >= 5000 && code <= 5999:
-		return "shopping"
-	default:
-		return "other"
-	}
+func openBankingTransactionClassificationText(transaction enableBankingTransaction, description string) string {
+	values := []string{description, transaction.Creditor.Name, transaction.Debtor.Name}
+	values = append(values, transaction.RemittanceInformation...)
+	values = append(values, transaction.Note, transaction.BankTransactionCode.Description)
+	return strings.Join(values, " ")
 }
 
 func cloneURLValues(values url.Values) url.Values {

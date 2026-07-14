@@ -420,6 +420,269 @@ func TestInvestmentDecimalAndIdentityValidation(t *testing.T) {
 	if _, _, _, _, err := normalizeInvestmentIdentity("stock", "AAPL", "Apple", "revolut_x"); apperrors.KindOf(err) != apperrors.KindValidation {
 		t.Fatalf("stock broker error = %v", err)
 	}
+	service := testService(&fakeStore{})
+	service.now = func() time.Time { return time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC) }
+	legacy, err := service.validateInvestmentTrade(model.InvestmentTradeRequest{
+		AssetType: "crypto", Symbol: "BTC", Broker: "manual", Side: "buy",
+		Quantity: "0.002", PricePerUnit: "50000", OccurredAt: "2026-07-14",
+	})
+	if err != nil || legacy.Amount != "100.00" {
+		t.Fatalf("legacy trade amount = %#v, %v", legacy, err)
+	}
+}
+
+func TestInvestmentTimestampsRejectAnyFutureInstant(t *testing.T) {
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	service := testService(&fakeStore{})
+	service.now = func() time.Time { return now }
+
+	_, err := service.CreateInvestmentTrade(context.Background(), 7, model.InvestmentTradeRequest{
+		AssetType: "crypto", Symbol: "BTC", Broker: "manual", Side: "buy", Amount: "25",
+		OccurredAt: now.Add(500 * time.Millisecond).Format(time.RFC3339Nano),
+	})
+	if apperrors.KindOf(err) != apperrors.KindValidation {
+		t.Fatalf("future trade error = %v", err)
+	}
+
+	_, err = service.SetManualInvestmentPrice(context.Background(), 7, model.InvestmentPriceRequest{
+		AssetType: "stock", Symbol: "ACME", Price: "10", AsOf: now.Add(500 * time.Millisecond).Format(time.RFC3339Nano),
+	})
+	if apperrors.KindOf(err) != apperrors.KindValidation {
+		t.Fatalf("future manual price error = %v", err)
+	}
+
+	if _, err := service.validateInvestmentTrade(model.InvestmentTradeRequest{
+		AssetType: "crypto", Symbol: "ETH", Broker: "manual", Side: "buy", Amount: "25",
+		OccurredAt: now.Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("trade at current instant error = %v", err)
+	}
+}
+
+func TestManualInvestmentPriceIsRestrictedToLegacyStocks(t *testing.T) {
+	service := testService(&fakeStore{})
+
+	_, err := service.SetManualInvestmentPrice(context.Background(), 7, model.InvestmentPriceRequest{
+		AssetType: "crypto", Symbol: "BTC", Price: "50000",
+	})
+	if apperrors.KindOf(err) != apperrors.KindValidation || !strings.Contains(err.Error(), "provided automatically") {
+		t.Fatalf("crypto manual price error = %v", err)
+	}
+
+	_, err = service.SetManualInvestmentPrice(context.Background(), 7, model.InvestmentPriceRequest{
+		AssetType: "stock", Symbol: "ACME", Price: "10",
+	})
+	if apperrors.KindOf(err) != apperrors.KindNotFound {
+		t.Fatalf("legacy stock manual price error = %v", err)
+	}
+}
+
+func TestCreateInvestmentTradeDerivesQuantityFromEuroAmount(t *testing.T) {
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	quotedAt := now.Add(-2 * time.Minute)
+	var stored model.InvestmentTradeRequest
+	store := &fakeStore{createInvestmentTrade: func(
+		_ context.Context, userID int, request model.InvestmentTradeRequest,
+	) (model.InvestmentTrade, error) {
+		if userID != 7 {
+			t.Fatalf("user ID = %d", userID)
+		}
+		stored = request
+		return model.InvestmentTrade{
+			ID: 9, AssetType: request.AssetType, Symbol: request.Symbol, Amount: request.Amount,
+			Quantity: request.Quantity, PricePerUnit: request.PricePerUnit,
+			PriceProvider: request.PriceProvider, PriceAsOf: request.PriceAsOf,
+		}, nil
+	}}
+	service := testService(store)
+	service.now = func() time.Time { return now }
+	service.marketData = &fakeInvestmentMarketData{quoteAt: func(
+		_ context.Context, symbol, currency string, at time.Time,
+	) (investmentMarketQuote, error) {
+		if symbol != "BTC" || currency != "EUR" || !at.Equal(now.Add(-time.Hour)) {
+			t.Fatalf("quote request = %s/%s at %s", symbol, currency, at)
+		}
+		return investmentMarketQuote{Price: "50000.00000", Provider: "kraken", AsOf: quotedAt}, nil
+	}}
+	trade, err := service.CreateInvestmentTrade(context.Background(), 7, model.InvestmentTradeRequest{
+		AssetType: "crypto", Symbol: "btc", AssetName: "ignored", Broker: "revolut_x",
+		Side: "buy", Amount: "100", Fees: "1", Currency: "EUR",
+		OccurredAt: now.Add(-time.Hour).Format(time.RFC3339), Notes: "Monthly buy",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trade.ID != 9 || stored.Amount != "100.00" || stored.Quantity != "0.002" || stored.PricePerUnit != "50000" {
+		t.Fatalf("derived trade = %#v, stored = %#v", trade, stored)
+	}
+	if stored.PriceProvider != "kraken" || stored.PriceAsOf != quotedAt.Format(time.RFC3339) || stored.AssetName != "Bitcoin" {
+		t.Fatalf("quote audit fields = %#v", stored)
+	}
+}
+
+func TestCreateInvestmentTradeDoesNotInsertWithoutMarketPrice(t *testing.T) {
+	inserted := false
+	store := &fakeStore{createInvestmentTrade: func(
+		context.Context, int, model.InvestmentTradeRequest,
+	) (model.InvestmentTrade, error) {
+		inserted = true
+		return model.InvestmentTrade{}, nil
+	}}
+	service := testService(store)
+	service.marketData = &fakeInvestmentMarketData{quoteAt: func(
+		context.Context, string, string, time.Time,
+	) (investmentMarketQuote, error) {
+		return investmentMarketQuote{}, errors.New("provider unavailable")
+	}}
+	_, err := service.CreateInvestmentTrade(context.Background(), 7, model.InvestmentTradeRequest{
+		AssetType: "crypto", Symbol: "BTC", Broker: "manual", Side: "buy", Amount: "25",
+		OccurredAt: time.Now().UTC().Add(-time.Hour).Format(time.RFC3339),
+	})
+	if apperrors.KindOf(err) != apperrors.KindUnavailable || inserted {
+		t.Fatalf("error = %v, inserted = %v", err, inserted)
+	}
+}
+
+func TestDeleteInvestmentTradeMapsAtomicRepositoryResult(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		repo error
+		kind apperrors.Kind
+	}{
+		{name: "deleted", kind: ""},
+		{name: "missing", repo: repository.ErrNotFound, kind: apperrors.KindNotFound},
+		{name: "depended on", repo: repository.ErrConflict, kind: apperrors.KindConflict},
+		{name: "database error", repo: errors.New("database unavailable"), kind: apperrors.KindInternal},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			called := false
+			service := testService(&fakeStore{deleteInvestmentTrade: func(
+				_ context.Context, userID, tradeID int,
+			) error {
+				called = true
+				if userID != 7 || tradeID != 9 {
+					t.Fatalf("delete arguments = %d/%d", userID, tradeID)
+				}
+				return test.repo
+			}})
+			err := service.DeleteInvestmentTrade(context.Background(), 7, 9)
+			if !called {
+				t.Fatal("repository delete was not called")
+			}
+			if test.kind == "" {
+				if err != nil {
+					t.Fatalf("delete error = %v", err)
+				}
+				return
+			}
+			if apperrors.KindOf(err) != test.kind {
+				t.Fatalf("delete error kind = %q, want %q: %v", apperrors.KindOf(err), test.kind, err)
+			}
+		})
+	}
+}
+
+func TestInvestmentPortfolioUsesLiveCryptoQuotesAndExcludesStocks(t *testing.T) {
+	store := &fakeStore{listInvestmentTrades: func(
+		context.Context, int, repository.InvestmentTradeFilter,
+	) ([]model.InvestmentTrade, error) {
+		return []model.InvestmentTrade{
+			{ID: 1, AssetType: "crypto", Symbol: "BTC", AssetName: "Bitcoin", Broker: "manual", Side: "buy", Amount: "100.00", Quantity: "0.002", PricePerUnit: "50000", Fees: "0", OccurredAt: "2026-07-01T10:00:00Z"},
+			{ID: 2, AssetType: "stock", Symbol: "AAPL", AssetName: "Apple", Broker: "trading212", Side: "buy", Amount: "50.00", Quantity: "0.25", PricePerUnit: "200", Fees: "0", OccurredAt: "2026-07-01T10:00:00Z"},
+		}, nil
+	}}
+	service := testService(store)
+	service.marketData = &fakeInvestmentMarketData{currentQuotes: func(
+		_ context.Context, symbols []string, currency string,
+	) (map[string]investmentMarketQuote, error) {
+		if len(symbols) != 1 || symbols[0] != "BTC" || currency != "EUR" {
+			t.Fatalf("current quote request = %#v/%s", symbols, currency)
+		}
+		return map[string]investmentMarketQuote{"BTC": {
+			Price: "60000", Provider: "kraken", AsOf: time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC),
+		}}, nil
+	}}
+	portfolio, err := service.InvestmentPortfolio(context.Background(), 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(portfolio.Positions) != 1 || portfolio.Positions[0].Symbol != "BTC" ||
+		portfolio.CurrentValue != "120.00" || portfolio.InvestedAmount != "100.00" ||
+		portfolio.UnsupportedPositions != 1 || portfolio.Positions[0].PriceProvider != "kraken" {
+		t.Fatalf("portfolio = %#v", portfolio)
+	}
+}
+
+func TestInvestmentPortfolioHistoryValuesDailyHoldingsAndCurrentPrice(t *testing.T) {
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	store := &fakeStore{listInvestmentTrades: func(
+		context.Context, int, repository.InvestmentTradeFilter,
+	) ([]model.InvestmentTrade, error) {
+		return []model.InvestmentTrade{
+			{ID: 2, AssetType: "crypto", Symbol: "BTC", Broker: "manual", Side: "sell", Amount: "30.00", Quantity: "0.0005", PricePerUnit: "60000", Fees: "0", OccurredAt: "2026-07-13T10:00:00Z"},
+			{ID: 1, AssetType: "crypto", Symbol: "BTC", Broker: "manual", Side: "buy", Amount: "100.00", Quantity: "0.002", PricePerUnit: "50000", Fees: "0", OccurredAt: "2026-07-12T10:00:00Z"},
+		}, nil
+	}}
+	service := testService(store)
+	service.now = func() time.Time { return now }
+	service.marketData = &fakeInvestmentMarketData{
+		dailyHistory: func(context.Context, string, string, time.Time) ([]investmentMarketHistoryPoint, error) {
+			return []investmentMarketHistoryPoint{
+				{Price: "49000", AsOf: time.Date(2026, 7, 11, 0, 0, 0, 0, time.UTC)},
+				{Price: "50000", AsOf: time.Date(2026, 7, 12, 0, 0, 0, 0, time.UTC)},
+				{Price: "60000", AsOf: time.Date(2026, 7, 13, 0, 0, 0, 0, time.UTC)},
+				{Price: "70000", AsOf: time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC)},
+			}, nil
+		},
+		currentQuotes: func(context.Context, []string, string) (map[string]investmentMarketQuote, error) {
+			return map[string]investmentMarketQuote{"BTC": {Price: "72000", Provider: "kraken", AsOf: now}}, nil
+		},
+	}
+	history, err := service.InvestmentPortfolioHistory(context.Background(), 7, "1y")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history.Points) != 3 || history.Points[0].Value != "100.00" ||
+		history.Points[1].Value != "90.00" || history.Points[2].Value != "108.00" ||
+		history.Points[2].InvestedAmount != "75.00" ||
+		history.Points[0].AsOf != "2026-07-12T23:59:59Z" ||
+		history.Points[1].AsOf != "2026-07-13T23:59:59Z" ||
+		history.Points[2].AsOf != now.Format(time.RFC3339) {
+		t.Fatalf("history = %#v", history)
+	}
+}
+
+type fakeInvestmentMarketData struct {
+	quoteAt       func(context.Context, string, string, time.Time) (investmentMarketQuote, error)
+	currentQuotes func(context.Context, []string, string) (map[string]investmentMarketQuote, error)
+	dailyHistory  func(context.Context, string, string, time.Time) ([]investmentMarketHistoryPoint, error)
+}
+
+func (f *fakeInvestmentMarketData) QuoteAt(
+	ctx context.Context, symbol, currency string, at time.Time,
+) (investmentMarketQuote, error) {
+	if f.quoteAt == nil {
+		return investmentMarketQuote{}, errors.New("unexpected QuoteAt call")
+	}
+	return f.quoteAt(ctx, symbol, currency, at)
+}
+
+func (f *fakeInvestmentMarketData) CurrentQuotes(
+	ctx context.Context, symbols []string, currency string,
+) (map[string]investmentMarketQuote, error) {
+	if f.currentQuotes == nil {
+		return nil, errors.New("unexpected CurrentQuotes call")
+	}
+	return f.currentQuotes(ctx, symbols, currency)
+}
+
+func (f *fakeInvestmentMarketData) DailyHistory(
+	ctx context.Context, symbol, currency string, since time.Time,
+) ([]investmentMarketHistoryPoint, error) {
+	if f.dailyHistory == nil {
+		return nil, errors.New("unexpected DailyHistory call")
+	}
+	return f.dailyHistory(ctx, symbol, currency, since)
 }
 
 func testService(store Store) *Service {
@@ -456,6 +719,10 @@ type fakeStore struct {
 	claimNotificationDeliveries     func(context.Context, time.Time, time.Time, time.Time, []string, int) ([]repository.NotificationDelivery, error)
 	completeNotificationDelivery    func(context.Context, int, bool, bool, bool, string, time.Time, time.Time) error
 	deleteUser                      func(context.Context, int) error
+	createInvestmentTrade           func(context.Context, int, model.InvestmentTradeRequest) (model.InvestmentTrade, error)
+	listInvestmentTrades            func(context.Context, int, repository.InvestmentTradeFilter) ([]model.InvestmentTrade, error)
+	deleteInvestmentTrade           func(context.Context, int, int) error
+	investmentHoldingQuantity       func(context.Context, int, string, string, string) (string, error)
 }
 
 func (f *fakeStore) ImportTransactions(ctx context.Context, userID int, transactions []model.ImportedTransaction) (int, int, error) {
@@ -605,16 +872,29 @@ func (*fakeStore) RegisterPushDevice(context.Context, int, model.PushDeviceReque
 func (*fakeStore) DeactivatePushDevice(context.Context, int, int) error {
 	return repository.ErrNotFound
 }
-func (*fakeStore) CreateInvestmentTrade(context.Context, int, model.InvestmentTradeRequest) (model.InvestmentTrade, error) {
+
+func (f *fakeStore) CreateInvestmentTrade(ctx context.Context, userID int, request model.InvestmentTradeRequest) (model.InvestmentTrade, error) {
+	if f.createInvestmentTrade != nil {
+		return f.createInvestmentTrade(ctx, userID, request)
+	}
 	return model.InvestmentTrade{}, nil
 }
-func (*fakeStore) ListInvestmentTrades(context.Context, int, repository.InvestmentTradeFilter) ([]model.InvestmentTrade, error) {
+func (f *fakeStore) ListInvestmentTrades(ctx context.Context, userID int, filter repository.InvestmentTradeFilter) ([]model.InvestmentTrade, error) {
+	if f.listInvestmentTrades != nil {
+		return f.listInvestmentTrades(ctx, userID, filter)
+	}
 	return []model.InvestmentTrade{}, nil
 }
-func (*fakeStore) DeleteInvestmentTrade(context.Context, int, int) error {
+func (f *fakeStore) DeleteInvestmentTrade(ctx context.Context, userID, tradeID int) error {
+	if f.deleteInvestmentTrade != nil {
+		return f.deleteInvestmentTrade(ctx, userID, tradeID)
+	}
 	return repository.ErrNotFound
 }
-func (*fakeStore) InvestmentHoldingQuantity(context.Context, int, string, string, string) (string, error) {
+func (f *fakeStore) InvestmentHoldingQuantity(ctx context.Context, userID int, assetType, symbol, broker string) (string, error) {
+	if f.investmentHoldingQuantity != nil {
+		return f.investmentHoldingQuantity(ctx, userID, assetType, symbol, broker)
+	}
 	return "0", nil
 }
 func (*fakeStore) ListInvestmentPrices(context.Context) ([]model.InvestmentPrice, error) {

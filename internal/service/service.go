@@ -20,6 +20,7 @@ type Service struct {
 	openBanking         openBankingClient
 	openBankingConfig   openBankingServiceConfig
 	openBankingError    error
+	marketData          investmentMarketDataClient
 	pushSenders         map[string]notificationSender
 	pushPlatforms       []string
 	pushError           error
@@ -65,6 +66,7 @@ func NewWithStore(store Store, cfg config.Config) *Service {
 		scheduleHorizonDays: 90,
 	}
 	result.configureOpenBanking(cfg)
+	result.configureInvestmentMarketData(cfg)
 	result.configurePush(cfg)
 	return result
 }

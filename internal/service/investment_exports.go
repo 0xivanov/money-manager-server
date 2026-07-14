@@ -25,7 +25,7 @@ func (s *Service) ExportInvestmentTrades(ctx context.Context, userID int, fromSt
 		return nil, apperrors.Validation("export date range must be 366 days or less")
 	}
 	items, err := s.store.ListInvestmentTrades(ctx, userID, repository.InvestmentTradeFilter{
-		From: from, Through: through, Limit: maximumExportRows + 1,
+		From: from, Through: through.AddDate(0, 0, 1), Limit: maximumExportRows + 1,
 	})
 	if err != nil {
 		return nil, apperrors.Internal(fmt.Errorf("export investment trades: %w", err))

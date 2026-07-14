@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"money-manager-server/internal/apperrors"
@@ -17,15 +18,29 @@ func (s *Service) validateInvestmentTrade(request model.InvestmentTradeRequest) 
 	if err != nil {
 		return model.InvestmentTradeRequest{}, err
 	}
+	if assetType != "crypto" {
+		return model.InvestmentTradeRequest{}, apperrors.Validation("stock investments are temporarily unavailable")
+	}
 	side := strings.ToLower(strings.TrimSpace(request.Side))
 	if side != "buy" && side != "sell" {
 		return model.InvestmentTradeRequest{}, apperrors.Validation("side must be buy or sell")
 	}
-	quantity, err := normalizeUnsignedDecimal(request.Quantity, "quantity", 18, 10, false)
-	if err != nil {
-		return model.InvestmentTradeRequest{}, err
+	amountValue := request.Amount
+	if strings.TrimSpace(amountValue) == "" &&
+		(strings.TrimSpace(request.Quantity) != "" || strings.TrimSpace(request.PricePerUnit) != "") {
+		legacyQuantity, quantityErr := normalizeUnsignedDecimal(request.Quantity, "quantity", 18, 18, false)
+		if quantityErr != nil {
+			return model.InvestmentTradeRequest{}, quantityErr
+		}
+		legacyPrice, priceErr := normalizeUnsignedDecimal(request.PricePerUnit, "price_per_unit", 12, 8, false)
+		if priceErr != nil {
+			return model.InvestmentTradeRequest{}, priceErr
+		}
+		quantityNumber, _ := new(big.Rat).SetString(legacyQuantity)
+		priceNumber, _ := new(big.Rat).SetString(legacyPrice)
+		amountValue = new(big.Rat).Mul(quantityNumber, priceNumber).FloatString(2)
 	}
-	price, err := normalizeUnsignedDecimal(request.PricePerUnit, "price_per_unit", 12, 8, false)
+	amount, err := normalizeAmount(amountValue)
 	if err != nil {
 		return model.InvestmentTradeRequest{}, err
 	}
@@ -45,15 +60,11 @@ func (s *Service) validateInvestmentTrade(request model.InvestmentTradeRequest) 
 	if currency != supportedCurrency {
 		return model.InvestmentTradeRequest{}, apperrors.Validation("currency must be EUR")
 	}
-	date, err := parseDate(request.OccurredAt, "occurred_at")
+	occurredAt, err := parseInvestmentOccurredAt(request.OccurredAt)
 	if err != nil {
 		return model.InvestmentTradeRequest{}, err
 	}
-	today, err := scheduleLocalDate(s.now(), defaultScheduleTimezone)
-	if err != nil {
-		return model.InvestmentTradeRequest{}, apperrors.Internal(fmt.Errorf("load default timezone: %w", err))
-	}
-	if date.After(today) {
+	if occurredAt.After(s.now().UTC()) {
 		return model.InvestmentTradeRequest{}, apperrors.Validation("occurred_at cannot be in the future")
 	}
 	notes, err := normalizeLimitedText(request.Notes, "notes", maximumDescriptionRunes, true)
@@ -62,9 +73,20 @@ func (s *Service) validateInvestmentTrade(request model.InvestmentTradeRequest) 
 	}
 	return model.InvestmentTradeRequest{
 		AssetType: assetType, Symbol: symbol, AssetName: assetName, Broker: broker, Side: side,
-		Quantity: quantity, PricePerUnit: price, Fees: fees, Currency: currency,
-		OccurredAt: date.Format("2006-01-02"), Notes: notes,
+		Amount: amount, Fees: fees, Currency: currency,
+		OccurredAt: occurredAt.UTC().Truncate(time.Second).Format(time.RFC3339), Notes: notes,
 	}, nil
+}
+
+func parseInvestmentOccurredAt(value string) (time.Time, error) {
+	value = strings.TrimSpace(value)
+	if timestamp, err := time.Parse(time.RFC3339, value); err == nil {
+		return timestamp.UTC(), nil
+	}
+	if date, err := time.Parse("2006-01-02", value); err == nil && date.Format("2006-01-02") == value {
+		return date.UTC(), nil
+	}
+	return time.Time{}, apperrors.Validation("occurred_at must use RFC3339 format")
 }
 
 func normalizeInvestmentIdentity(assetTypeValue, symbolValue, assetNameValue, brokerValue string) (string, string, string, string, error) {

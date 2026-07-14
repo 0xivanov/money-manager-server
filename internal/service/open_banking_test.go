@@ -322,6 +322,99 @@ func TestNormalizeOpenBankingTransactionPrefersStableEntryReference(t *testing.T
 	}
 }
 
+func TestNormalizeOpenBankingTransactionAcceptsStringAndNumericMCC(t *testing.T) {
+	today := time.Date(2026, 7, 13, 0, 0, 0, 0, time.UTC)
+	for _, merchantCategoryCode := range []string{`"5411"`, `5411`} {
+		raw := json.RawMessage(`{
+			"entry_reference":"food-purchase",
+			"merchant_category_code":` + merchantCategoryCode + `,
+			"transaction_amount":{"currency":"EUR","amount":"18.90"},
+			"credit_debit_indicator":"DBIT",
+			"status":"BOOK",
+			"booking_date":"2026-07-12",
+			"creditor":{"name":"Unknown merchant"}
+		}`)
+		item, ok := normalizeOpenBankingTransaction(raw, today)
+		if !ok || item.Category != "food" {
+			t.Fatalf("MCC %s normalized transaction = %#v, included=%v", merchantCategoryCode, item, ok)
+		}
+		var metadata map[string]any
+		if err := json.Unmarshal(item.Metadata, &metadata); err != nil {
+			t.Fatal(err)
+		}
+		if metadata["merchant_category_code"] != "5411" ||
+			metadata["classification_source"] != openBankingCategorySourceMCC ||
+			metadata["category_source"] != openBankingCategorySourceMCC {
+			t.Fatalf("MCC %s metadata = %#v", merchantCategoryCode, metadata)
+		}
+	}
+}
+
+func TestNormalizeOpenBankingTransactionUsesRevolutFriendlyKeywordFallbacks(t *testing.T) {
+	today := time.Date(2026, 7, 13, 0, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name             string
+		providerFields   string
+		indicator        string
+		expectedCategory string
+		expectedSource   string
+	}{
+		{
+			name: "expense merchant hidden in remittance",
+			providerFields: `"creditor":{"name":"Revolut"},
+				"remittance_information":["Card payment to LIDL Bulgaria"]`,
+			indicator:        "DBIT",
+			expectedCategory: "food",
+			expectedSource:   openBankingCategorySourceExpenseKeyword,
+		},
+		{
+			name:             "expense merchant name",
+			providerFields:   `"creditor":{"name":"BOLT.EU ride"}`,
+			indicator:        "DBIT",
+			expectedCategory: "transport",
+			expectedSource:   openBankingCategorySourceExpenseKeyword,
+		},
+		{
+			name:             "income description",
+			providerFields:   `"debtor":{"name":"ACME client invoice 1042"}`,
+			indicator:        "CRDT",
+			expectedCategory: "freelance",
+			expectedSource:   openBankingCategorySourceIncomeKeyword,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			raw := json.RawMessage(`{
+				"entry_reference":"keyword-transaction",
+				"transaction_amount":{"currency":"EUR","amount":"18.90"},
+				"credit_debit_indicator":"` + test.indicator + `",
+				"status":"BOOK",
+				"booking_date":"2026-07-12",
+				` + test.providerFields + `
+			}`)
+			item, ok := normalizeOpenBankingTransaction(raw, today)
+			if !ok || item.Category != test.expectedCategory {
+				t.Fatalf("normalized transaction = %#v, included=%v", item, ok)
+			}
+			var metadata map[string]any
+			if err := json.Unmarshal(item.Metadata, &metadata); err != nil {
+				t.Fatal(err)
+			}
+			if metadata["classification_source"] != test.expectedSource ||
+				metadata["classified_category"] != test.expectedCategory {
+				t.Fatalf("classification metadata = %#v", metadata)
+			}
+		})
+	}
+}
+
+func TestOpenBankingCategoryClassifierPrefersMCCBeforeKeywords(t *testing.T) {
+	classification := classifyOpenBankingTransaction("expense", "5541", "LIDL supermarket")
+	if classification.Category != "transport" || classification.Source != openBankingCategorySourceMCC {
+		t.Fatalf("classification = %#v", classification)
+	}
+}
+
 func TestOpenBankingBackgroundMaintenanceClaimsOnceAndContinuesAfterFailure(t *testing.T) {
 	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
 	var released []int

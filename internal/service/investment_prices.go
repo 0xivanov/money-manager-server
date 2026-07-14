@@ -28,6 +28,11 @@ func (s *Service) SetManualInvestmentPrice(
 	if err := validateCryptoSymbol(assetType, symbol); err != nil {
 		return model.InvestmentPrice{}, err
 	}
+	if assetType == "crypto" {
+		return model.InvestmentPrice{}, apperrors.Validation(
+			"manual prices are unavailable for crypto because crypto prices are provided automatically",
+		)
+	}
 	price, err := normalizeUnsignedDecimal(request.Price, "price", 12, 8, false)
 	if err != nil {
 		return model.InvestmentPrice{}, err
@@ -39,16 +44,18 @@ func (s *Service) SetManualInvestmentPrice(
 	if currency != supportedCurrency {
 		return model.InvestmentPrice{}, apperrors.Validation("currency must be EUR")
 	}
-	asOf := s.now().UTC().Truncate(time.Second)
+	now := s.now().UTC()
+	asOf := now.Truncate(time.Second)
 	if strings.TrimSpace(request.AsOf) != "" {
-		asOf, err = time.Parse(time.RFC3339, strings.TrimSpace(request.AsOf))
-		if err != nil {
+		parsedAsOf, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(request.AsOf))
+		if parseErr != nil {
 			return model.InvestmentPrice{}, apperrors.Validation("as_of must use RFC3339 format")
 		}
-		asOf = asOf.UTC().Truncate(time.Second)
-		if asOf.After(s.now().UTC().Add(5 * time.Minute)) {
+		parsedAsOf = parsedAsOf.UTC()
+		if parsedAsOf.After(now) {
 			return model.InvestmentPrice{}, apperrors.Validation("as_of cannot be in the future")
 		}
+		asOf = parsedAsOf.Truncate(time.Second)
 	}
 	request.AssetType, request.Symbol, request.Price, request.Currency = assetType, symbol, price, currency
 	item, err := s.store.UpsertManualInvestmentPrice(ctx, userID, request, asOf)

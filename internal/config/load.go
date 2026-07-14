@@ -98,6 +98,9 @@ func Load() (Config, error) {
 	if cfg.EnableBankingRequestTimeout, err = durationEnv("ENABLE_BANKING_REQUEST_TIMEOUT", 20*time.Second); err != nil {
 		return Config{}, err
 	}
+	if cfg.MarketDataRequestTimeout, err = durationEnv("MARKET_DATA_REQUEST_TIMEOUT", 15*time.Second); err != nil {
+		return Config{}, err
+	}
 	if cfg.APNSRequestTimeout, err = durationEnv("APNS_REQUEST_TIMEOUT", 10*time.Second); err != nil {
 		return Config{}, err
 	}

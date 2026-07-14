@@ -124,8 +124,18 @@ func (r *Repository) GetTransaction(ctx context.Context, userID, transactionID i
 
 func (r *Repository) UpdateTransaction(ctx context.Context, userID, transactionID int, request model.TransactionRequest) (model.Transaction, error) {
 	row := r.db.QueryRow(ctx, `UPDATE transactions
-        SET type=$1,category=$2,description=$3,amount=$4,currency=$5,occurred_at=$6,
-            excluded_from_budget=$7,updated_at=now()
+		SET source_metadata=CASE
+				WHEN source='open_banking' AND (type IS DISTINCT FROM $1 OR category IS DISTINCT FROM $2)
+				THEN source_metadata || jsonb_strip_nulls(jsonb_build_object(
+					'classification_override',true,
+					'type_override',CASE WHEN type IS DISTINCT FROM $1 THEN true END,
+					'category_override',CASE WHEN category IS DISTINCT FROM $2 THEN true END,
+					'category_source','user_override'
+				))
+				ELSE source_metadata
+			END,
+			type=$1,category=$2,description=$3,amount=$4,currency=$5,occurred_at=$6,
+			excluded_from_budget=$7,updated_at=now()
         WHERE id=$8 AND user_id=$9
         RETURNING id,type,category,description,amount::text,currency,to_char(occurred_at,'YYYY-MM-DD'),
             source,status,excluded_from_budget,schedule_occurrence_id`,

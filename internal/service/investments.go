@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"regexp"
 	"strings"
+	"time"
 
 	"money-manager-server/internal/apperrors"
 	"money-manager-server/internal/model"
@@ -30,7 +31,45 @@ func (s *Service) CreateInvestmentTrade(
 	if err != nil {
 		return model.InvestmentTrade{}, err
 	}
+	if s.marketData == nil {
+		return model.InvestmentTrade{}, apperrors.Unavailable(
+			"crypto market pricing is temporarily unavailable", errors.New("market data client is not configured"),
+		)
+	}
+	occurredAt, err := time.Parse(time.RFC3339, normalized.OccurredAt)
+	if err != nil {
+		return model.InvestmentTrade{}, apperrors.Internal(fmt.Errorf("parse normalized investment timestamp: %w", err))
+	}
+	quote, err := s.marketData.QuoteAt(ctx, normalized.Symbol, normalized.Currency, occurredAt)
+	if err != nil {
+		return model.InvestmentTrade{}, apperrors.Unavailable("crypto market pricing is temporarily unavailable", err)
+	}
+	price, err := normalizeUnsignedDecimal(quote.Price, "market price", 12, 8, false)
+	if err != nil {
+		return model.InvestmentTrade{}, apperrors.Unavailable("crypto market pricing returned an invalid price", err)
+	}
+	provider, err := normalizeLimitedText(quote.Provider, "market price provider", 100, false)
+	if err != nil || quote.AsOf.IsZero() {
+		return model.InvestmentTrade{}, apperrors.Unavailable(
+			"crypto market pricing returned an invalid quote", errors.New("market quote audit data is missing"),
+		)
+	}
+	amountNumber, _ := new(big.Rat).SetString(normalized.Amount)
+	priceNumber, _ := new(big.Rat).SetString(price)
+	quantityNumber := new(big.Rat).Quo(amountNumber, priceNumber)
+	quantity := formatRatTrimmed(quantityNumber, 18)
+	if quantity == "0" {
+		return model.InvestmentTrade{}, apperrors.Validation("amount is too small for the selected asset")
+	}
+	normalized.Quantity = quantity
+	normalized.PricePerUnit = price
+	normalized.PriceProvider = provider
+	normalized.PriceAsOf = quote.AsOf.UTC().Truncate(time.Second).Format(time.RFC3339)
 	if normalized.Side == "sell" {
+		fees, _ := new(big.Rat).SetString(normalized.Fees)
+		if fees.Cmp(amountNumber) >= 0 {
+			return model.InvestmentTrade{}, apperrors.Validation("sell fees must be less than the sold amount")
+		}
 		holding, err := s.store.InvestmentHoldingQuantity(ctx, userID, normalized.AssetType, normalized.Symbol, normalized.Broker)
 		if err != nil {
 			return model.InvestmentTrade{}, apperrors.Internal(fmt.Errorf("get investment holding: %w", err))
@@ -45,6 +84,9 @@ func (s *Service) CreateInvestmentTrade(
 		}
 	}
 	item, err := s.store.CreateInvestmentTrade(ctx, userID, normalized)
+	if errors.Is(err, repository.ErrConflict) {
+		return model.InvestmentTrade{}, apperrors.Validation("sell amount cannot exceed the holding available at that time")
+	}
 	if err != nil {
 		return model.InvestmentTrade{}, apperrors.Internal(fmt.Errorf("create investment trade: %w", err))
 	}
@@ -69,8 +111,9 @@ func (s *Service) ListInvestmentTrades(
 		if err != nil {
 			return nil, err
 		}
+		filter.Through = filter.Through.AddDate(0, 0, 1)
 	}
-	if !filter.From.IsZero() && !filter.Through.IsZero() && filter.Through.Before(filter.From) {
+	if !filter.From.IsZero() && !filter.Through.IsZero() && !filter.Through.After(filter.From) {
 		return nil, apperrors.Validation("through must be on or after from")
 	}
 	if strings.TrimSpace(assetType) != "" {
@@ -105,28 +148,12 @@ func (s *Service) DeleteInvestmentTrade(ctx context.Context, userID, tradeID int
 	if err := validateID(tradeID); err != nil {
 		return err
 	}
-	trades, err := s.store.ListInvestmentTrades(ctx, userID, repository.InvestmentTradeFilter{Limit: maximumInvestmentTradeRows + 1})
-	if err != nil {
-		return apperrors.Internal(fmt.Errorf("validate investment trade deletion: %w", err))
-	}
-	found := false
-	remaining := make([]model.InvestmentTrade, 0, len(trades)-1)
-	for _, trade := range trades {
-		if trade.ID == tradeID {
-			found = true
-			continue
-		}
-		remaining = append(remaining, trade)
-	}
-	if !found {
-		return apperrors.NotFound("investment trade not found")
-	}
-	if err := validateInvestmentLedgerNeverNegative(remaining); err != nil {
-		return apperrors.Conflict("this trade cannot be deleted because a later sale depends on it")
-	}
-	err = s.store.DeleteInvestmentTrade(ctx, userID, tradeID)
+	err := s.store.DeleteInvestmentTrade(ctx, userID, tradeID)
 	if errors.Is(err, repository.ErrNotFound) {
 		return apperrors.NotFound("investment trade not found")
+	}
+	if errors.Is(err, repository.ErrConflict) {
+		return apperrors.Conflict("this trade cannot be deleted because a later sale depends on it")
 	}
 	if err != nil {
 		return apperrors.Internal(fmt.Errorf("delete investment trade: %w", err))

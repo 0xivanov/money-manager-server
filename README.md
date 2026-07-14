@@ -8,7 +8,7 @@ Production-oriented Go API shared by the Money Manager Android and iOS applicati
 - Transaction and category CRUD scoped to the authenticated user
 - Daily, weekly, and monthly income and expense schedules with occurrence tracking
 - Category and total spending budgets with configurable warning thresholds
-- Manual stock and crypto trade tracking, portfolio valuation, price updates, reminders, and audit CSV export
+- Amount-based BTC and ETH trade tracking with automatic Kraken reference pricing, portfolio history, reminders, and audit CSV export
 - Notification preferences, push-device registration, and an outbox for budget, schedule, investment, and bank-spending events
 - Strict EUR amount, category, date, and request validation
 - Monthly summaries and date-range CSV export
@@ -79,6 +79,7 @@ go run ./cmd/server
 | `ENABLE_BANKING_CONSENT_DAYS` | `90` | Default requested consent lifetime. The server clamps it to the institution's reported maximum. |
 | `ENABLE_BANKING_STATE_TTL` | `15m` | Lifetime of one-time authorization state. Allowed range is 1 minute to 1 hour. |
 | `ENABLE_BANKING_REQUEST_TIMEOUT` | `20s` | Timeout for Enable Banking API calls. Maximum is 1 minute. |
+| `MARKET_DATA_REQUEST_TIMEOUT` | `15s` | Overall timeout for a public Kraken market-data operation, including local rate-limit queueing. Maximum is 1 minute. No Kraken API key is required. |
 | `APNS_KEY_ID` | unset | Apple Push Notification authentication key ID. Configure all APNs values together. |
 | `APNS_TEAM_ID` | unset | Apple Developer team ID that owns the push key and iOS app. |
 | `APNS_BUNDLE_ID` | unset | APNs topic. This must match the iOS bundle identifier, currently `org.moneymanager.ios`. |
@@ -177,9 +178,10 @@ Planning and notifications:
 Investments:
 
 - `GET /investments/portfolio`
+- `GET /investments/portfolio/history?range=1y` (`1m`, `3m`, or `1y`)
 - `GET|POST /investments/trades`
 - `DELETE /investments/trades/{id}`
-- `PUT /investments/prices`
+- `PUT /investments/prices` (deprecated, legacy stock records only; crypto prices are automatic)
 - `GET /investments/export?from=2026-01-01&to=2026-12-31`
 - `GET|POST /investment-schedules`
 - `GET|PUT|DELETE /investment-schedules/{id}`
@@ -214,7 +216,9 @@ Start a Revolut consent flow after selecting the exact institution name returned
 
 The response contains an `authorization_url` that the mobile app opens in the system browser. Enable Banking returns to the configured callback. The server validates and consumes the state once, exchanges the code for a session, saves the authorized accounts, and then renders a completion page or redirects to `ENABLE_BANKING_RESULT_REDIRECT_URL`.
 
-The account sync endpoint imports Enable Banking transactions into the normal Money Manager ledger. Imports are idempotent, use the provider's stable `entry_reference`, refresh changed pending or booked records, preserve the originating account, and enqueue bank-spending events only for newly observed booked expenses after the initial sync. The iOS account detail screen calls this endpoint when account activity is loaded or refreshed. Initial history does not produce a burst of old spending alerts.
+The account sync endpoint imports Enable Banking transactions into the normal Money Manager ledger. Imports are idempotent, use the provider's stable `entry_reference`, refresh changed pending or booked records, preserve the originating account, and enqueue bank-spending events only for newly observed booked expenses after the initial sync. Categories are inferred from merchant category codes first, then deterministic merchant and payment-description rules when a bank such as Revolut omits the code. The category migration also applies those rules once to existing open-banking rows that still use `other`. Existing non-`other` corrections are marked as user overrides, and manual user category corrections are preserved during later syncs. The iOS account detail screen calls this endpoint when account activity is loaded or refreshed. Initial history does not produce a burst of old spending alerts.
+
+BTC and ETH trades accept an EUR amount and exact RFC3339 execution time. Future execution times are rejected. The server fetches a nearby public BTC/EUR or ETH/EUR Kraken trade, records the reference price and provider timestamp, and derives the crypto quantity. The previous quantity-plus-price request shape remains accepted temporarily and is converted to an EUR amount before the server fetches its own reference quote. Current valuation uses the public order-book midpoint. The one-year portfolio chart uses Kraken daily close data, labels completed daily points at `23:59:59Z`, and finishes with an exact current-time quote. These are reference market prices, not an assertion of the user's exact broker fill. Kraken public market data does not require an API key. Manual crypto price writes are rejected because they are not used by valuation. The legacy manual-price endpoint remains available only for existing stock records and is deprecated until stock valuation is enabled again. New stock trades and plans are temporarily disabled, while the generic stock ledger code and existing stock records remain available for a future provider.
 
 The server also claims connected accounts for background refresh at most once every six hours, without PSU headers, matching Enable Banking's documented background-fetching guidance and common four-request-per-day bank limits. Claims are stored in PostgreSQL so the two production replicas cannot duplicate the same provider fetch.
 
@@ -249,6 +253,7 @@ The API maps validation, authentication, missing resources, conflicts, rate limi
 - Currency is EUR. Missing currency is normalized to EUR for client compatibility.
 - Amounts must be positive, have at most two decimal places, and not exceed `999999999999.99`.
 - Dates use `YYYY-MM-DD`; month filters use `YYYY-MM`.
+- Investment trade timestamps use RFC3339. Date-only investment input remains accepted as midnight UTC for compatibility.
 - A transaction category must be active, owned by the user, and match the transaction type.
 - Category names are limited to 40 Unicode characters.
 - Descriptions are limited to 500 Unicode characters.

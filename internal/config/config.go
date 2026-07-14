@@ -41,6 +41,7 @@ type Config struct {
 	EnableBankingConsentDays       int
 	EnableBankingStateTTL          time.Duration
 	EnableBankingRequestTimeout    time.Duration
+	MarketDataRequestTimeout       time.Duration
 	APNSKeyID                      string
 	APNSTeamID                     string
 	APNSBundleID                   string

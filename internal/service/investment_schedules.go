@@ -151,6 +151,9 @@ func (s *Service) validateInvestmentSchedule(
 	if err != nil {
 		return model.InvestmentScheduleRequest{}, err
 	}
+	if assetType != "crypto" {
+		return model.InvestmentScheduleRequest{}, apperrors.Validation("stock investments are temporarily unavailable")
+	}
 	amount, err := normalizeAmount(request.Amount)
 	if err != nil {
 		return model.InvestmentScheduleRequest{}, err
