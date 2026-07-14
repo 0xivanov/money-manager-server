@@ -1,8 +1,10 @@
 package config
 
 import (
+	"crypto/ecdsa"
 	"crypto/rsa"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -49,6 +51,15 @@ type Config struct {
 	EnableBankingConsentDays       int
 	EnableBankingStateTTL          time.Duration
 	EnableBankingRequestTimeout    time.Duration
+	APNSKeyID                      string
+	APNSTeamID                     string
+	APNSBundleID                   string
+	APNSPrivateKey                 *ecdsa.PrivateKey
+	APNSRequestTimeout             time.Duration
+	FCMProjectID                   string
+	FCMClientEmail                 string
+	FCMPrivateKey                  *rsa.PrivateKey
+	FCMRequestTimeout              time.Duration
 }
 
 func Load() (Config, error) {
@@ -76,6 +87,46 @@ func Load() (Config, error) {
 	}
 	if configuredKeySources > 1 {
 		return Config{}, errors.New("configure only one Enable Banking private key source")
+	}
+
+	apnsKeyBase64 := strings.TrimSpace(os.Getenv("APNS_PRIVATE_KEY_BASE64"))
+	if apnsKeyBase64 != "" {
+		decoded, decodeErr := base64.StdEncoding.DecodeString(apnsKeyBase64)
+		if decodeErr != nil {
+			return Config{}, fmt.Errorf("APNS_PRIVATE_KEY_BASE64: decode base64: %w", decodeErr)
+		}
+		cfg.APNSPrivateKey, err = jwt.ParseECPrivateKeyFromPEM(decoded)
+		if err != nil {
+			return Config{}, fmt.Errorf("APNS_PRIVATE_KEY_BASE64: parse EC private key: %w", err)
+		}
+	}
+	cfg.APNSKeyID = strings.TrimSpace(os.Getenv("APNS_KEY_ID"))
+	cfg.APNSTeamID = strings.TrimSpace(os.Getenv("APNS_TEAM_ID"))
+	cfg.APNSBundleID = strings.TrimSpace(os.Getenv("APNS_BUNDLE_ID"))
+
+	fcmServiceAccountBase64 := strings.TrimSpace(os.Getenv("FCM_SERVICE_ACCOUNT_BASE64"))
+	if fcmServiceAccountBase64 != "" {
+		decoded, decodeErr := base64.StdEncoding.DecodeString(fcmServiceAccountBase64)
+		if decodeErr != nil {
+			return Config{}, fmt.Errorf("FCM_SERVICE_ACCOUNT_BASE64: decode base64: %w", decodeErr)
+		}
+		var account struct {
+			ProjectID   string `json:"project_id"`
+			ClientEmail string `json:"client_email"`
+			PrivateKey  string `json:"private_key"`
+		}
+		if decodeErr := json.Unmarshal(decoded, &account); decodeErr != nil {
+			return Config{}, fmt.Errorf("FCM_SERVICE_ACCOUNT_BASE64: decode service account JSON: %w", decodeErr)
+		}
+		cfg.FCMProjectID = strings.TrimSpace(account.ProjectID)
+		cfg.FCMClientEmail = strings.TrimSpace(account.ClientEmail)
+		cfg.FCMPrivateKey, err = jwt.ParseRSAPrivateKeyFromPEM([]byte(account.PrivateKey))
+		if err != nil {
+			return Config{}, fmt.Errorf("FCM_SERVICE_ACCOUNT_BASE64: parse RSA private key: %w", err)
+		}
+		if cfg.FCMProjectID == "" || cfg.FCMClientEmail == "" {
+			return Config{}, errors.New("FCM_SERVICE_ACCOUNT_BASE64 must contain project_id and client_email")
+		}
 	}
 	if keyBase64 != "" {
 		decoded, decodeErr := base64.StdEncoding.DecodeString(keyBase64)
@@ -162,6 +213,12 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if cfg.EnableBankingRequestTimeout, err = durationEnv("ENABLE_BANKING_REQUEST_TIMEOUT", 20*time.Second); err != nil {
+		return Config{}, err
+	}
+	if cfg.APNSRequestTimeout, err = durationEnv("APNS_REQUEST_TIMEOUT", 10*time.Second); err != nil {
+		return Config{}, err
+	}
+	if cfg.FCMRequestTimeout, err = durationEnv("FCM_REQUEST_TIMEOUT", 10*time.Second); err != nil {
 		return Config{}, err
 	}
 
@@ -255,6 +312,23 @@ func (c Config) validateAt(now time.Time) error {
 	}
 	if c.EnableBankingRequestTimeout <= 0 || c.EnableBankingRequestTimeout > time.Minute {
 		errs = append(errs, errors.New("ENABLE_BANKING_REQUEST_TIMEOUT must be positive and no more than 1m"))
+	}
+	apnsConfiguredValues := 0
+	for _, configured := range []bool{
+		c.APNSKeyID != "", c.APNSTeamID != "", c.APNSBundleID != "", c.APNSPrivateKey != nil,
+	} {
+		if configured {
+			apnsConfiguredValues++
+		}
+	}
+	if apnsConfiguredValues != 0 && apnsConfiguredValues != 4 {
+		errs = append(errs, errors.New("APNS_KEY_ID, APNS_TEAM_ID, APNS_BUNDLE_ID, and APNS_PRIVATE_KEY_BASE64 must be configured together"))
+	}
+	if c.APNSRequestTimeout <= 0 || c.APNSRequestTimeout > time.Minute {
+		errs = append(errs, errors.New("APNS_REQUEST_TIMEOUT must be positive and no more than 1m"))
+	}
+	if c.FCMRequestTimeout <= 0 || c.FCMRequestTimeout > time.Minute {
+		errs = append(errs, errors.New("FCM_REQUEST_TIMEOUT must be positive and no more than 1m"))
 	}
 	if port, err := strconv.Atoi(c.Port); err != nil || port < 1 || port > 65535 {
 		errs = append(errs, errors.New("PORT must be between 1 and 65535"))

@@ -63,6 +63,11 @@ type OpenBankingAccountRecord struct {
 	ProviderPayload   json.RawMessage
 }
 
+type OpenBankingSyncAccount struct {
+	UserID    int
+	AccountID int
+}
+
 func (r *Repository) ListOpenBankingProviderSessions(ctx context.Context, userID int) ([]string, error) {
 	rows, err := r.db.Query(ctx, `SELECT provider_session_id FROM open_banking_connections
 		WHERE user_id=$1 ORDER BY id`, userID)
@@ -247,7 +252,8 @@ func (r *Repository) DeleteOpenBankingConnection(ctx context.Context, userID, co
 func (r *Repository) ListOpenBankingAccounts(ctx context.Context, userID int) ([]model.OpenBankingAccount, error) {
 	rows, err := r.db.Query(ctx, `SELECT a.id,a.connection_id,c.institution_name,c.country,a.name,a.details,
 		a.cash_account_type,a.product,a.currency,a.display_identifier,a.identification_hash,
-		(a.provider_account_id IS NOT NULL)
+		(a.provider_account_id IS NOT NULL),
+		COALESCE(to_char(a.last_synced_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')
 		FROM open_banking_accounts a
 		JOIN open_banking_connections c ON c.id=a.connection_id
 		WHERE c.user_id=$1 ORDER BY c.created_at DESC,a.id`, userID)
@@ -262,7 +268,7 @@ func (r *Repository) ListOpenBankingAccounts(ctx context.Context, userID int) ([
 			&account.ID, &account.ConnectionID, &account.InstitutionName, &account.Country,
 			&account.Name, &account.Details, &account.CashAccountType, &account.Product,
 			&account.Currency, &account.DisplayIdentifier, &account.IdentificationHash,
-			&account.CanFetchData,
+			&account.CanFetchData, &account.LastSyncedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -275,7 +281,9 @@ func (r *Repository) GetOpenBankingAccount(ctx context.Context, userID, accountI
 	var record OpenBankingAccountRecord
 	err := r.db.QueryRow(ctx, `SELECT a.id,a.connection_id,c.institution_name,c.country,a.name,a.details,
 		a.cash_account_type,a.product,a.currency,a.display_identifier,a.identification_hash,
-		(a.provider_account_id IS NOT NULL),COALESCE(a.provider_account_id,''),a.provider_payload
+		(a.provider_account_id IS NOT NULL),
+		COALESCE(to_char(a.last_synced_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"'),''),
+		COALESCE(a.provider_account_id,''),a.provider_payload
 		FROM open_banking_accounts a
 		JOIN open_banking_connections c ON c.id=a.connection_id
 		WHERE a.id=$1 AND c.user_id=$2`, accountID, userID,
@@ -284,7 +292,8 @@ func (r *Repository) GetOpenBankingAccount(ctx context.Context, userID, accountI
 		&record.Account.Country, &record.Account.Name, &record.Account.Details,
 		&record.Account.CashAccountType, &record.Account.Product, &record.Account.Currency,
 		&record.Account.DisplayIdentifier, &record.Account.IdentificationHash,
-		&record.Account.CanFetchData, &record.ProviderAccountID, &record.ProviderPayload,
+		&record.Account.CanFetchData, &record.Account.LastSyncedAt,
+		&record.ProviderAccountID, &record.ProviderPayload,
 	)
 	return record, mapNotFound(err)
 }

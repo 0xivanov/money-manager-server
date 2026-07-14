@@ -284,6 +284,144 @@ func TestImportRevolutCSVRejectsUnknownShape(t *testing.T) {
 	}
 }
 
+func TestCreateTransactionScheduleNormalizesAndMaterializesMonthlyDates(t *testing.T) {
+	now := time.Date(2026, 1, 30, 10, 0, 0, 0, time.UTC)
+	var seeds []repository.ScheduleOccurrenceSeed
+	var materializedThrough time.Time
+	store := &fakeStore{
+		findCategory: func(_ context.Context, userID int, transactionType, category string) (string, error) {
+			if userID != 7 || transactionType != "expense" || category != "housing" {
+				t.Fatalf("category lookup = %d, %q, %q", userID, transactionType, category)
+			}
+			return "Housing", nil
+		},
+		createTransactionSchedule: func(_ context.Context, userID int, request model.TransactionScheduleRequest) (model.TransactionSchedule, error) {
+			if userID != 7 || request.Name != "Rent" || request.Amount != "1250.00" || request.Currency != "EUR" {
+				t.Fatalf("normalized schedule = %d, %#v", userID, request)
+			}
+			if request.Frequency != "monthly" || request.FrequencyInterval != 1 || request.DayOfMonth == nil || *request.DayOfMonth != 31 {
+				t.Fatalf("normalized recurrence = %#v", request)
+			}
+			return model.TransactionSchedule{
+				ID: 11, UserID: userID, Type: request.Type, Name: request.Name, Category: request.Category,
+				Description: request.Description, Amount: request.Amount, Currency: request.Currency,
+				Frequency: request.Frequency, FrequencyInterval: request.FrequencyInterval,
+				StartDate: request.StartDate, EndDate: request.EndDate, DayOfMonth: request.DayOfMonth,
+				Timezone: request.Timezone, AutoPost: request.AutoPost, Status: "active",
+			}, nil
+		},
+		upsertScheduleOccurrences: func(_ context.Context, value []repository.ScheduleOccurrenceSeed) (int, error) {
+			seeds = append([]repository.ScheduleOccurrenceSeed(nil), value...)
+			return len(value), nil
+		},
+		markScheduleMaterialized: func(_ context.Context, scheduleID int, through time.Time) error {
+			if scheduleID != 11 {
+				t.Fatalf("materialized schedule id = %d", scheduleID)
+			}
+			materializedThrough = through
+			return nil
+		},
+		getTransactionSchedule: func(_ context.Context, userID, scheduleID int, _ time.Time) (model.TransactionSchedule, error) {
+			return model.TransactionSchedule{ID: scheduleID, UserID: userID, Name: "Rent", Status: "active"}, nil
+		},
+	}
+	service := testService(store)
+	service.now = func() time.Time { return now }
+
+	schedule, err := service.CreateTransactionSchedule(context.Background(), 7, model.TransactionScheduleRequest{
+		Type: " Expense ", Name: " Rent ", Category: "housing", Amount: "1250",
+		Frequency: "MONTHLY", StartDate: "2026-01-31", Timezone: "Europe/Sofia", AutoPost: true,
+	})
+	if err != nil || schedule.ID != 11 {
+		t.Fatalf("CreateTransactionSchedule() = %#v, %v", schedule, err)
+	}
+	wantDates := []string{"2026-01-31", "2026-02-28", "2026-03-31", "2026-04-30"}
+	if len(seeds) != len(wantDates) {
+		t.Fatalf("occurrence count = %d, seeds = %#v", len(seeds), seeds)
+	}
+	for index, want := range wantDates {
+		if got := seeds[index].ScheduledFor.Format("2006-01-02"); got != want || seeds[index].UserID != 7 {
+			t.Fatalf("occurrence %d = %q for user %d, want %q for user 7", index, got, seeds[index].UserID, want)
+		}
+	}
+	if got := materializedThrough.Format("2006-01-02"); got != "2026-04-30" {
+		t.Fatalf("materialized through = %q", got)
+	}
+}
+
+func TestCreateTransactionScheduleRejectsInvalidRecurrence(t *testing.T) {
+	now := time.Date(2026, 7, 13, 10, 0, 0, 0, time.UTC)
+	dayOfWeek := 1
+	tests := []model.TransactionScheduleRequest{
+		{Type: "expense", Name: "Past", Category: "Housing", Amount: "1", Frequency: "monthly", StartDate: "2026-07-12"},
+		{Type: "expense", Name: "Mixed", Category: "Housing", Amount: "1", Frequency: "monthly", StartDate: "2026-07-14", DayOfWeek: &dayOfWeek},
+		{Type: "expense", Name: "Bad zone", Category: "Housing", Amount: "1", Frequency: "daily", StartDate: "2026-07-14", Timezone: "Mars/Olympus"},
+	}
+	for _, request := range tests {
+		service := testService(&fakeStore{findCategory: func(context.Context, int, string, string) (string, error) {
+			return "Housing", nil
+		}})
+		service.now = func() time.Time { return now }
+		if _, err := service.CreateTransactionSchedule(context.Background(), 1, request); apperrors.KindOf(err) != apperrors.KindValidation {
+			t.Errorf("request %#v error = %v", request, err)
+		}
+	}
+}
+
+func TestCalculateInvestmentPortfolioTracksAverageCostAndProfit(t *testing.T) {
+	portfolio, err := calculateInvestmentPortfolio([]model.InvestmentTrade{
+		{ID: 3, AssetType: "stock", Symbol: "ACME", AssetName: "Acme", Broker: "trading212", Side: "sell", Quantity: "1", PricePerUnit: "150", Fees: "2", OccurredAt: "2026-03-01"},
+		{ID: 1, AssetType: "stock", Symbol: "ACME", AssetName: "Acme", Broker: "trading212", Side: "buy", Quantity: "2", PricePerUnit: "100", Fees: "2", OccurredAt: "2026-01-01"},
+		{ID: 2, AssetType: "stock", Symbol: "ACME", AssetName: "Acme", Broker: "trading212", Side: "buy", Quantity: "1", PricePerUnit: "130", Fees: "1", OccurredAt: "2026-02-01"},
+	}, []model.InvestmentPrice{{AssetType: "stock", Symbol: "ACME", Price: "160", AsOf: "2026-07-13T10:00:00Z"}})
+	if err != nil {
+		t.Fatalf("calculateInvestmentPortfolio() error = %v", err)
+	}
+	if len(portfolio.Positions) != 1 {
+		t.Fatalf("positions = %#v", portfolio.Positions)
+	}
+	position := portfolio.Positions[0]
+	if position.Quantity != "2" || position.AverageCost != "111.00000000" || position.InvestedAmount != "222.00" {
+		t.Fatalf("position cost = %#v", position)
+	}
+	if position.CurrentValue != "320.00" || position.UnrealizedProfit != "98.00" || position.RealizedProfit != "37.00" {
+		t.Fatalf("position profit = %#v", position)
+	}
+	if portfolio.CurrentValue != "320.00" || portfolio.UnrealizedProfit != "98.00" || portfolio.RealizedProfit != "37.00" || portfolio.MissingPrices != 0 {
+		t.Fatalf("portfolio totals = %#v", portfolio)
+	}
+}
+
+func TestCalculateInvestmentPortfolioDoesNotRequirePriceForClosedPosition(t *testing.T) {
+	portfolio, err := calculateInvestmentPortfolio([]model.InvestmentTrade{
+		{ID: 1, AssetType: "crypto", Symbol: "BTC", AssetName: "Bitcoin", Broker: "revolut_x", Side: "buy", Quantity: "0.1", PricePerUnit: "50000", Fees: "1", OccurredAt: "2026-01-01"},
+		{ID: 2, AssetType: "crypto", Symbol: "BTC", AssetName: "Bitcoin", Broker: "revolut_x", Side: "sell", Quantity: "0.1", PricePerUnit: "60000", Fees: "1", OccurredAt: "2026-02-01"},
+	}, nil)
+	if err != nil {
+		t.Fatalf("calculateInvestmentPortfolio() error = %v", err)
+	}
+	if portfolio.MissingPrices != 0 || portfolio.Positions[0].PriceStatus != "not_required" || portfolio.RealizedProfit != "998.00" {
+		t.Fatalf("closed portfolio = %#v", portfolio)
+	}
+}
+
+func TestInvestmentDecimalAndIdentityValidation(t *testing.T) {
+	if value, err := normalizeUnsignedDecimal("000.0100000000", "quantity", 18, 10, false); err != nil || value != "0.01" {
+		t.Fatalf("normalized quantity = %q, %v", value, err)
+	}
+	for _, value := range []string{"0", "-1", "1.00000000001", "1e2", ".5"} {
+		if _, err := normalizeUnsignedDecimal(value, "quantity", 18, 10, false); apperrors.KindOf(err) != apperrors.KindValidation {
+			t.Errorf("quantity %q error = %v", value, err)
+		}
+	}
+	if _, _, _, _, err := normalizeInvestmentIdentity("crypto", "SOL", "Solana", "revolut_x"); apperrors.KindOf(err) != apperrors.KindValidation {
+		t.Fatalf("unsupported crypto error = %v", err)
+	}
+	if _, _, _, _, err := normalizeInvestmentIdentity("stock", "AAPL", "Apple", "revolut_x"); apperrors.KindOf(err) != apperrors.KindValidation {
+		t.Fatalf("stock broker error = %v", err)
+	}
+}
+
 func testService(store Store) *Service {
 	cfg := config.Config{
 		JWTSecret: strings.Repeat("s", 32), JWTIssuer: "money-manager-api",
@@ -300,6 +438,10 @@ type fakeStore struct {
 	updateTransaction               func(context.Context, int, int, model.TransactionRequest) (model.Transaction, error)
 	exportTransactions              func(context.Context, int, time.Time, time.Time, int) ([]model.Transaction, error)
 	importTransactions              func(context.Context, int, []model.ImportedTransaction) (int, int, error)
+	createTransactionSchedule       func(context.Context, int, model.TransactionScheduleRequest) (model.TransactionSchedule, error)
+	getTransactionSchedule          func(context.Context, int, int, time.Time) (model.TransactionSchedule, error)
+	upsertScheduleOccurrences       func(context.Context, []repository.ScheduleOccurrenceSeed) (int, error)
+	markScheduleMaterialized        func(context.Context, int, time.Time) error
 	createOpenBankingAuthorization  func(context.Context, repository.NewOpenBankingAuthorization) (int, error)
 	setOpenBankingProviderID        func(context.Context, int, string) error
 	claimOpenBankingAuthorization   func(context.Context, string, time.Time) (repository.OpenBankingAuthorizationRecord, error)
@@ -308,6 +450,11 @@ type fakeStore struct {
 	getOpenBankingConnection        func(context.Context, int, int) (repository.OpenBankingConnectionRecord, error)
 	getOpenBankingAccount           func(context.Context, int, int) (repository.OpenBankingAccountRecord, error)
 	listOpenBankingProviderSessions func(context.Context, int) ([]string, error)
+	importOpenBankingTransactions   func(context.Context, int, int, []repository.OpenBankingTransactionSeed, time.Time) (model.OpenBankingSyncResult, error)
+	claimOpenBankingAccountsForSync func(context.Context, time.Time, time.Time, time.Time, int) ([]repository.OpenBankingSyncAccount, error)
+	releaseOpenBankingSyncClaim     func(context.Context, int) error
+	claimNotificationDeliveries     func(context.Context, time.Time, time.Time, []string, int) ([]repository.NotificationDelivery, error)
+	completeNotificationDelivery    func(context.Context, int, bool, bool, bool, string, time.Time, time.Time) error
 	deleteUser                      func(context.Context, int) error
 }
 
@@ -384,6 +531,122 @@ func (*fakeStore) DeleteTransaction(context.Context, int, int) error { return ni
 func (*fakeStore) Summary(context.Context, int, string, time.Time, time.Time) (model.Summary, error) {
 	return model.Summary{}, nil
 }
+func (f *fakeStore) CreateTransactionSchedule(ctx context.Context, userID int, request model.TransactionScheduleRequest) (model.TransactionSchedule, error) {
+	if f.createTransactionSchedule != nil {
+		return f.createTransactionSchedule(ctx, userID, request)
+	}
+	return model.TransactionSchedule{}, errors.New("unexpected CreateTransactionSchedule call")
+}
+func (*fakeStore) ListTransactionSchedules(context.Context, int, string, time.Time) ([]model.TransactionSchedule, error) {
+	return []model.TransactionSchedule{}, nil
+}
+func (f *fakeStore) GetTransactionSchedule(ctx context.Context, userID, scheduleID int, now time.Time) (model.TransactionSchedule, error) {
+	if f.getTransactionSchedule != nil {
+		return f.getTransactionSchedule(ctx, userID, scheduleID, now)
+	}
+	return model.TransactionSchedule{}, repository.ErrNotFound
+}
+func (*fakeStore) UpdateTransactionSchedule(context.Context, int, int, model.TransactionScheduleRequest, time.Time) (model.TransactionSchedule, error) {
+	return model.TransactionSchedule{}, repository.ErrNotFound
+}
+func (*fakeStore) SetTransactionScheduleStatus(context.Context, int, int, string) error {
+	return repository.ErrNotFound
+}
+func (*fakeStore) ArchiveTransactionSchedule(context.Context, int, int) error {
+	return repository.ErrNotFound
+}
+func (*fakeStore) ListActiveTransactionSchedules(context.Context) ([]model.TransactionSchedule, error) {
+	return []model.TransactionSchedule{}, nil
+}
+func (f *fakeStore) UpsertTransactionScheduleOccurrences(ctx context.Context, seeds []repository.ScheduleOccurrenceSeed) (int, error) {
+	if f.upsertScheduleOccurrences != nil {
+		return f.upsertScheduleOccurrences(ctx, seeds)
+	}
+	return 0, nil
+}
+func (f *fakeStore) MarkTransactionScheduleMaterializedThrough(ctx context.Context, scheduleID int, through time.Time) error {
+	if f.markScheduleMaterialized != nil {
+		return f.markScheduleMaterialized(ctx, scheduleID, through)
+	}
+	return nil
+}
+func (*fakeStore) ListTransactionScheduleOccurrences(context.Context, int, repository.ScheduleOccurrenceFilter) ([]model.TransactionScheduleOccurrence, error) {
+	return []model.TransactionScheduleOccurrence{}, nil
+}
+func (*fakeStore) PostDueTransactionScheduleOccurrences(context.Context, time.Time, int) (int, error) {
+	return 0, nil
+}
+func (*fakeStore) QueueDueTransactionScheduleReminders(context.Context, time.Time, int) (int, error) {
+	return 0, nil
+}
+func (*fakeStore) ListBudgets(context.Context, int, time.Time, bool) ([]model.Budget, error) {
+	return []model.Budget{}, nil
+}
+func (*fakeStore) GetBudget(context.Context, int, int, time.Time) (model.Budget, error) {
+	return model.Budget{}, repository.ErrNotFound
+}
+func (*fakeStore) CreateBudget(context.Context, int, model.BudgetRequest, time.Time) (model.Budget, error) {
+	return model.Budget{}, nil
+}
+func (*fakeStore) UpdateBudget(context.Context, int, int, model.BudgetRequest, time.Time) (model.Budget, error) {
+	return model.Budget{}, repository.ErrNotFound
+}
+func (*fakeStore) ArchiveBudget(context.Context, int, int) error             { return repository.ErrNotFound }
+func (*fakeStore) QueueBudgetAlerts(context.Context, time.Time) (int, error) { return 0, nil }
+func (*fakeStore) GetNotificationPreferences(context.Context, int) (model.NotificationPreferences, error) {
+	return model.NotificationPreferences{Timezone: defaultScheduleTimezone}, nil
+}
+func (*fakeStore) UpdateNotificationPreferences(context.Context, int, model.NotificationPreferences) (model.NotificationPreferences, error) {
+	return model.NotificationPreferences{}, nil
+}
+func (*fakeStore) RegisterPushDevice(context.Context, int, model.PushDeviceRequest) (model.PushDevice, error) {
+	return model.PushDevice{ID: 1}, nil
+}
+func (*fakeStore) DeactivatePushDevice(context.Context, int, int) error {
+	return repository.ErrNotFound
+}
+func (*fakeStore) CreateInvestmentTrade(context.Context, int, model.InvestmentTradeRequest) (model.InvestmentTrade, error) {
+	return model.InvestmentTrade{}, nil
+}
+func (*fakeStore) ListInvestmentTrades(context.Context, int, repository.InvestmentTradeFilter) ([]model.InvestmentTrade, error) {
+	return []model.InvestmentTrade{}, nil
+}
+func (*fakeStore) DeleteInvestmentTrade(context.Context, int, int) error {
+	return repository.ErrNotFound
+}
+func (*fakeStore) InvestmentHoldingQuantity(context.Context, int, string, string, string) (string, error) {
+	return "0", nil
+}
+func (*fakeStore) ListInvestmentPrices(context.Context) ([]model.InvestmentPrice, error) {
+	return []model.InvestmentPrice{}, nil
+}
+func (*fakeStore) UpsertManualInvestmentPrice(context.Context, int, model.InvestmentPriceRequest, time.Time) (model.InvestmentPrice, error) {
+	return model.InvestmentPrice{}, repository.ErrNotFound
+}
+func (*fakeStore) CreateInvestmentSchedule(context.Context, int, model.InvestmentScheduleRequest) (model.InvestmentSchedule, error) {
+	return model.InvestmentSchedule{}, nil
+}
+func (*fakeStore) ListInvestmentSchedules(context.Context, int, string) ([]model.InvestmentSchedule, error) {
+	return []model.InvestmentSchedule{}, nil
+}
+func (*fakeStore) GetInvestmentSchedule(context.Context, int, int) (model.InvestmentSchedule, error) {
+	return model.InvestmentSchedule{}, repository.ErrNotFound
+}
+func (*fakeStore) UpdateInvestmentSchedule(context.Context, int, int, model.InvestmentScheduleRequest) (model.InvestmentSchedule, error) {
+	return model.InvestmentSchedule{}, repository.ErrNotFound
+}
+func (*fakeStore) SetInvestmentScheduleStatus(context.Context, int, int, string) error {
+	return repository.ErrNotFound
+}
+func (*fakeStore) ArchiveInvestmentSchedule(context.Context, int, int) error {
+	return repository.ErrNotFound
+}
+func (*fakeStore) ListActiveInvestmentSchedules(context.Context) ([]model.InvestmentSchedule, error) {
+	return []model.InvestmentSchedule{}, nil
+}
+func (*fakeStore) QueueInvestmentReminder(context.Context, model.InvestmentSchedule, time.Time) (bool, error) {
+	return false, nil
+}
 func (f *fakeStore) CreateOpenBankingAuthorization(ctx context.Context, record repository.NewOpenBankingAuthorization) (int, error) {
 	if f.createOpenBankingAuthorization != nil {
 		return f.createOpenBankingAuthorization(ctx, record)
@@ -441,4 +704,60 @@ func (f *fakeStore) ListOpenBankingProviderSessions(ctx context.Context, userID 
 		return f.listOpenBankingProviderSessions(ctx, userID)
 	}
 	return []string{}, nil
+}
+func (f *fakeStore) ImportOpenBankingTransactions(
+	ctx context.Context,
+	userID int,
+	accountID int,
+	transactions []repository.OpenBankingTransactionSeed,
+	syncedAt time.Time,
+) (model.OpenBankingSyncResult, error) {
+	if f.importOpenBankingTransactions != nil {
+		return f.importOpenBankingTransactions(ctx, userID, accountID, transactions, syncedAt)
+	}
+	return model.OpenBankingSyncResult{}, errors.New("unexpected ImportOpenBankingTransactions call")
+}
+
+func (f *fakeStore) ClaimOpenBankingAccountsForSync(
+	ctx context.Context,
+	now time.Time,
+	nextAttempt time.Time,
+	claimUntil time.Time,
+	limit int,
+) ([]repository.OpenBankingSyncAccount, error) {
+	if f.claimOpenBankingAccountsForSync != nil {
+		return f.claimOpenBankingAccountsForSync(ctx, now, nextAttempt, claimUntil, limit)
+	}
+	return []repository.OpenBankingSyncAccount{}, nil
+}
+
+func (f *fakeStore) ReleaseOpenBankingSyncClaim(ctx context.Context, accountID int) error {
+	if f.releaseOpenBankingSyncClaim != nil {
+		return f.releaseOpenBankingSyncClaim(ctx, accountID)
+	}
+	return nil
+}
+
+func (f *fakeStore) ClaimNotificationDeliveries(
+	ctx context.Context, now, staleBefore time.Time, platforms []string, limit int,
+) ([]repository.NotificationDelivery, error) {
+	if f.claimNotificationDeliveries != nil {
+		return f.claimNotificationDeliveries(ctx, now, staleBefore, platforms, limit)
+	}
+	return []repository.NotificationDelivery{}, nil
+}
+
+func (f *fakeStore) CompleteNotificationDelivery(
+	ctx context.Context,
+	deliveryID int,
+	success, permanent, deactivate bool,
+	errorMessage string,
+	retryAt, now time.Time,
+) error {
+	if f.completeNotificationDelivery != nil {
+		return f.completeNotificationDelivery(
+			ctx, deliveryID, success, permanent, deactivate, errorMessage, retryAt, now,
+		)
+	}
+	return nil
 }

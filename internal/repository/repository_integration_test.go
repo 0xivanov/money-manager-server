@@ -118,6 +118,92 @@ func TestRepositoryIntegration(t *testing.T) {
 	if err != nil || len(accounts) != 1 || accounts[0].DisplayIdentifier != "•••• 0123" || !accounts[0].CanFetchData {
 		t.Fatalf("open banking accounts = %#v, %v", accounts, err)
 	}
+	accountID := accounts[0].ID
+	claimTime := time.Now().UTC().Add(time.Second)
+	syncClaimed, err := repo.ClaimOpenBankingAccountsForSync(
+		ctx, claimTime, claimTime.Add(6*time.Hour), claimTime.Add(5*time.Minute), 10,
+	)
+	if err != nil || len(syncClaimed) != 1 || syncClaimed[0].UserID != user.ID || syncClaimed[0].AccountID != accountID {
+		t.Fatalf("claimed open banking accounts = %#v, %v", syncClaimed, err)
+	}
+	claimedAgain, err := repo.ClaimOpenBankingAccountsForSync(
+		ctx, claimTime, claimTime.Add(6*time.Hour), claimTime.Add(5*time.Minute), 10,
+	)
+	if err != nil || len(claimedAgain) != 0 {
+		t.Fatalf("duplicate open banking claims = %#v, %v", claimedAgain, err)
+	}
+	firstSync, err := repo.ImportOpenBankingTransactions(ctx, user.ID, accountID, []OpenBankingTransactionSeed{{
+		ExternalID: "bank-transaction-1", Type: "expense", Category: "food",
+		Description: "Fresh Market", Amount: "42.80", Currency: "EUR",
+		OccurredAt: monthStart.AddDate(0, 0, 10), Status: "booked", Metadata: []byte(`{"mcc":"5411"}`),
+	}}, claimTime)
+	if err != nil || firstSync.Imported != 1 || firstSync.Notifications != 0 {
+		t.Fatalf("initial bank sync = %#v, %v", firstSync, err)
+	}
+	secondSync, err := repo.ImportOpenBankingTransactions(ctx, user.ID, accountID, []OpenBankingTransactionSeed{
+		{
+			ExternalID: "bank-transaction-1", Type: "expense", Category: "food",
+			Description: "Fresh Market", Amount: "42.80", Currency: "EUR",
+			OccurredAt: monthStart.AddDate(0, 0, 10), Status: "booked", Metadata: []byte(`{"mcc":"5411"}`),
+		},
+		{
+			ExternalID: "bank-transaction-2", Type: "expense", Category: "transport",
+			Description: "Metro", Amount: "2.00", Currency: "EUR",
+			OccurredAt: monthStart.AddDate(0, 0, 11), Status: "booked", Metadata: []byte(`{"mcc":"4111"}`),
+		},
+	}, claimTime)
+	if err != nil || secondSync.Imported != 1 || secondSync.Unchanged != 1 || secondSync.Notifications != 1 {
+		t.Fatalf("incremental bank sync = %#v, %v", secondSync, err)
+	}
+	var bankTransactions, bankNotifications int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM transactions
+		WHERE user_id=$1 AND source='open_banking'`, user.ID).Scan(&bankTransactions); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM notification_outbox
+		WHERE user_id=$1 AND event_type='bank_spending'`, user.ID).Scan(&bankNotifications); err != nil {
+		t.Fatal(err)
+	}
+	if bankTransactions != 2 || bankNotifications != 1 {
+		t.Fatalf("persisted bank sync transactions=%d notifications=%d", bankTransactions, bankNotifications)
+	}
+	scheduleReminders, err := repo.QueueDueTransactionScheduleReminders(ctx, claimTime, 10)
+	if err != nil || scheduleReminders != 0 {
+		t.Fatalf("queue due transaction schedule reminders = %d, %v", scheduleReminders, err)
+	}
+	device, err := repo.RegisterPushDevice(ctx, user.ID, model.PushDeviceRequest{
+		Platform: "ios", DeviceToken: "0123456789abcdef0123456789abcdef",
+		AppID: "org.moneymanager.ios", Environment: "sandbox",
+	})
+	if err != nil {
+		t.Fatalf("register push device: %v", err)
+	}
+	deliveryTime := claimTime.Add(time.Minute)
+	deliveries, err := repo.ClaimNotificationDeliveries(
+		ctx, deliveryTime, deliveryTime.Add(-10*time.Minute), []string{"ios"}, 10,
+	)
+	if err != nil || len(deliveries) != 1 || deliveries[0].DeviceID != device.ID || deliveries[0].EventType != "bank_spending" {
+		t.Fatalf("claimed notification deliveries = %#v, %v", deliveries, err)
+	}
+	if err := repo.CompleteNotificationDelivery(
+		ctx, deliveries[0].ID, true, false, false, "", deliveryTime, deliveryTime,
+	); err != nil {
+		t.Fatalf("complete notification delivery: %v", err)
+	}
+	var outboxStatus, deliveryStatus string
+	if err := pool.QueryRow(ctx, `SELECT notification.status,delivery.status
+		FROM notification_outbox notification
+		JOIN notification_deliveries delivery ON delivery.notification_id=notification.id`).Scan(
+		&outboxStatus, &deliveryStatus,
+	); err != nil || outboxStatus != "sent" || deliveryStatus != "sent" {
+		t.Fatalf("notification statuses = %q/%q, %v", outboxStatus, deliveryStatus, err)
+	}
+	claimedAfterInterval, err := repo.ClaimOpenBankingAccountsForSync(
+		ctx, claimTime.Add(6*time.Hour+time.Second), claimTime.Add(12*time.Hour), claimTime.Add(6*time.Hour+5*time.Minute), 10,
+	)
+	if err != nil || len(claimedAfterInterval) != 1 || claimedAfterInterval[0].AccountID != accountID {
+		t.Fatalf("open banking claim after interval = %#v, %v", claimedAfterInterval, err)
+	}
 }
 
 func TestLegacySchemaUpgradeQuarantinesInvalidRows(t *testing.T) {
@@ -184,7 +270,7 @@ func TestLegacySchemaUpgradeQuarantinesInvalidRows(t *testing.T) {
 	if err := pool.QueryRow(ctx, "SELECT count(*) FROM schema_migrations").Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if users != 1 || categories != 1 || transactions != 1 || quarantined != 8 || versions != 5 {
+	if users != 1 || categories != 1 || transactions != 1 || quarantined != 8 || versions != 9 {
 		t.Fatalf("legacy upgrade counts users=%d categories=%d transactions=%d quarantined=%d versions=%d", users, categories, transactions, quarantined, versions)
 	}
 	var email, transactionType, category, currency string

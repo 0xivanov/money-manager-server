@@ -6,6 +6,10 @@ Production-oriented Go API shared by the Money Manager Android and iOS applicati
 
 - HS256 JWT authentication with issuer, audience, issued-at, and expiration validation
 - Transaction and category CRUD scoped to the authenticated user
+- Daily, weekly, and monthly income and expense schedules with occurrence tracking
+- Category and total spending budgets with configurable warning thresholds
+- Manual stock and crypto trade tracking, portfolio valuation, price updates, reminders, and audit CSV export
+- Notification preferences, push-device registration, and an outbox for budget, schedule, investment, and bank-spending events
 - Strict EUR amount, category, date, and request validation
 - Monthly summaries and date-range CSV export
 - Account inspection and deletion through `/me`
@@ -75,6 +79,13 @@ go run ./cmd/server
 | `ENABLE_BANKING_CONSENT_DAYS` | `90` | Default requested consent lifetime. The server clamps it to the institution's reported maximum. |
 | `ENABLE_BANKING_STATE_TTL` | `15m` | Lifetime of one-time authorization state. Allowed range is 1 minute to 1 hour. |
 | `ENABLE_BANKING_REQUEST_TIMEOUT` | `20s` | Timeout for Enable Banking API calls. Maximum is 1 minute. |
+| `APNS_KEY_ID` | unset | Apple Push Notification authentication key ID. Configure all APNs values together. |
+| `APNS_TEAM_ID` | unset | Apple Developer team ID that owns the push key and iOS app. |
+| `APNS_BUNDLE_ID` | unset | APNs topic. This must match the iOS bundle identifier, currently `org.moneymanager.ios`. |
+| `APNS_PRIVATE_KEY_BASE64` | unset | One-line base64 encoding of the Apple `.p8` push authentication key. The raw key is never stored in the repository. |
+| `APNS_REQUEST_TIMEOUT` | `10s` | Timeout for an APNs delivery attempt. Maximum is 1 minute. |
+| `FCM_SERVICE_ACCOUNT_BASE64` | unset | One-line base64 encoding of a Firebase service-account JSON key authorized for FCM HTTP v1. |
+| `FCM_REQUEST_TIMEOUT` | `10s` | Timeout for Firebase OAuth and message delivery requests. Maximum is 1 minute. |
 
 The sandbox and production applications use the same Enable Banking API origin. Select the environment by supplying the application ID and private key that belong to that environment. Never embed either private key in an iOS or Android build.
 
@@ -88,6 +99,22 @@ go run ./cmd/server
 ```
 
 Docker Compose accepts either the PEM through `ENABLE_BANKING_PRIVATE_KEY` or its one-line base64 encoding through `ENABLE_BANKING_PRIVATE_KEY_BASE64`. Export one of them before running `docker compose up`; the private key is not checked into the repository.
+
+APNs delivery is optional. Create an Apple Push Notifications authentication key in the Apple Developer portal, then encode the downloaded `.p8` file once on macOS:
+
+```bash
+base64 -i /absolute/path/to/AuthKey_KEYID.p8 | tr -d '\n'
+```
+
+Store that output as the `APNS_PRIVATE_KEY_BASE64` deployer secret. Store the key ID, team ID, and bundle ID as their corresponding secrets. Never commit the `.p8` file or its encoded value.
+
+FCM delivery is also optional. Create a narrowly scoped Firebase service account authorized for the Cloud Messaging API, download its JSON key once, and encode it without line breaks:
+
+```bash
+base64 -i /absolute/path/to/firebase-service-account.json | tr -d '\n'
+```
+
+Store the output as `FCM_SERVICE_ACCOUNT_BASE64`. The Android Firebase project values are client identifiers and belong in local Gradle properties, while the service-account JSON is a server secret and must never be placed in the Android project.
 
 ### Legacy JWT transition
 
@@ -134,6 +161,29 @@ Transactions:
 - `GET /transactions/export?from=2026-07-01&to=2026-07-31`
 - `POST /transactions/import/revolut` with a `text/csv` Revolut account statement body
 
+Planning and notifications:
+
+- `GET|POST /schedules`
+- `GET|PUT|DELETE /schedules/{id}`
+- `POST /schedules/{id}/pause`
+- `POST /schedules/{id}/resume`
+- `GET /schedule-occurrences?from=2026-07-01&through=2026-07-31`
+- `GET|POST /budgets`
+- `GET|PUT|DELETE /budgets/{id}`
+- `GET|PUT /notification-preferences`
+- `POST /push-devices`
+- `DELETE /push-devices/{id}`
+
+Investments:
+
+- `GET /investments/portfolio`
+- `GET|POST /investments/trades`
+- `DELETE /investments/trades/{id}`
+- `PUT /investments/prices`
+- `GET /investments/export?from=2026-01-01&to=2026-12-31`
+- `GET|POST /investment-schedules`
+- `GET|PUT|DELETE /investment-schedules/{id}`
+
 Open banking:
 
 - `GET /api/open-banking/banks?country=BG&psu_type=personal`
@@ -146,6 +196,7 @@ Open banking:
 - `GET /api/open-banking/accounts/{id}/details`
 - `GET /api/open-banking/accounts/{id}/balances`
 - `GET /api/open-banking/accounts/{id}/transactions?date_from=2026-07-01&date_to=2026-07-31&transaction_status=BOOK&strategy=default`
+- `POST /api/open-banking/accounts/{id}/sync`
 
 All open-banking endpoints except the callback require a Money Manager access token. Institution responses are reduced to UI-safe metadata, so Enable Banking sandbox usernames and passwords are never returned. Provider session and account IDs stay server-side behind local user-owned IDs.
 
@@ -162,6 +213,12 @@ Start a Revolut consent flow after selecting the exact institution name returned
 ```
 
 The response contains an `authorization_url` that the mobile app opens in the system browser. Enable Banking returns to the configured callback. The server validates and consumes the state once, exchanges the code for a session, saves the authorized accounts, and then renders a completion page or redirects to `ENABLE_BANKING_RESULT_REDIRECT_URL`.
+
+The account sync endpoint imports Enable Banking transactions into the normal Money Manager ledger. Imports are idempotent, use the provider's stable `entry_reference`, refresh changed pending or booked records, preserve the originating account, and enqueue bank-spending events only for newly observed booked expenses after the initial sync. The iOS account detail screen calls this endpoint when account activity is loaded or refreshed. Initial history does not produce a burst of old spending alerts.
+
+The server also claims connected accounts for background refresh at most once every six hours, without PSU headers, matching Enable Banking's documented background-fetching guidance and common four-request-per-day bank limits. Claims are stored in PostgreSQL so the two production replicas cannot duplicate the same provider fetch.
+
+APNs delivery for iOS and FCM HTTP v1 delivery for Android are implemented with short-lived signed credentials, retry backoff, quiet-hour enforcement, per-device delivery records, invalid-token deactivation, and PostgreSQL claims safe across two replicas. Each provider activates only when its complete credential set is present.
 
 Linking a Revolut account manually in the Enable Banking control panel only activates or whitelists that account for restricted production use. It does not create an API session. Each Money Manager user must still complete the authorization flow above. A restricted production application returns data only for accounts already linked in the control panel; unrestricted access requires Enable Banking production activation.
 
