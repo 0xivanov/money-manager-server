@@ -48,6 +48,7 @@ go run ./cmd/server
 | --- | --- | --- |
 | `PORT` | `8080` | HTTP listen port. |
 | `DATABASE_URL` | required | PostgreSQL URL. Production should use a private endpoint and TLS where available. |
+| `REDIS_URL` | unset | Optional `redis://` or `rediss://` URL used for user-scoped investment portfolio and history response caching. Successful entries expire after exactly five minutes and trade writes evict the user's entries. |
 | `JWT_SECRET` | required | JWT signing key, at least 32 bytes. |
 | `JWT_ISSUER` | `money-manager-api` | Required token issuer. |
 | `JWT_AUDIENCE` | `money-manager-mobile` | Required token audience. |
@@ -347,3 +348,14 @@ deployer routes list
 For `ENABLE_BANKING_PRIVATE_KEY_BASE64`, encode the production PEM as one line with `base64 < prod.pem | tr -d '\n'`, then paste that value into the deployer's hidden prompt. Set `ENABLE_BANKING_CALLBACK_URL` to `https://money.0xivanov.dev/api/open-banking/callback` and register that exact URL in the production Enable Banking application before rollout.
 
 The PostgreSQL service is intentionally external to the stateless API deployment. It must be reachable from both worker nodes, restricted to the private network, backed up off-host, and restore-tested before release.
+
+The production Redis cache is an internal-only, authenticated Kubernetes service. Create or rotate its password without printing it, apply the cache resources, and store the matching connection URL in the deployer's encrypted secrets:
+
+```bash
+REDIS_PASSWORD="$(openssl rand -hex 32)"
+ssh deployer-vps "sudo k3s kubectl -n deployer-apps create secret generic money-manager-redis-auth --from-literal=REDIS_PASSWORD='$REDIS_PASSWORD' --dry-run=client -o yaml | sudo k3s kubectl apply -f -"
+ssh deployer-vps 'sudo k3s kubectl apply -f -' < ops/redis-cache.yaml
+deployer secrets set money-manager-api REDIS_URL
+```
+
+Use `redis://:<password>@money-manager-redis.deployer-apps.svc.cluster.local:6379/0` as `REDIS_URL`. Redis has no public route, accepts traffic only from the API pods, and uses an eviction-only `emptyDir` because portfolio values remain reproducible from PostgreSQL and market data.

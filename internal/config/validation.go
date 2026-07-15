@@ -18,6 +18,12 @@ func (c Config) validateAt(now time.Time) error {
 	if c.DatabaseURL == "" {
 		errs = append(errs, errors.New("DATABASE_URL is required"))
 	}
+	if c.RedisURL != "" {
+		parsed, err := url.Parse(c.RedisURL)
+		if err != nil || parsed.Host == "" || (parsed.Scheme != "redis" && parsed.Scheme != "rediss") || parsed.Fragment != "" {
+			errs = append(errs, errors.New("REDIS_URL must be an absolute redis:// or rediss:// URL without a fragment"))
+		}
+	}
 	if len([]byte(c.JWTSecret)) < minimumJWTSecretBytes {
 		errs = append(errs, fmt.Errorf("JWT_SECRET must be at least %d bytes", minimumJWTSecretBytes))
 	}

@@ -10,6 +10,7 @@ func Load() (Config, error) {
 	cfg := Config{
 		Port:                           envOrDefault("PORT", "8080"),
 		DatabaseURL:                    strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		RedisURL:                       strings.TrimSpace(os.Getenv("REDIS_URL")),
 		JWTSecret:                      os.Getenv("JWT_SECRET"),
 		JWTIssuer:                      envOrDefault("JWT_ISSUER", "money-manager-api"),
 		JWTAudience:                    envOrDefault("JWT_AUDIENCE", "money-manager-mobile"),

@@ -21,6 +21,7 @@ type Service struct {
 	openBankingConfig   openBankingServiceConfig
 	openBankingError    error
 	marketData          investmentMarketDataClient
+	investmentCache     investmentResponseCache
 	pushSenders         map[string]notificationSender
 	pushPlatforms       []string
 	pushError           error
@@ -67,11 +68,15 @@ func NewWithStore(store Store, cfg config.Config) *Service {
 	}
 	result.configureOpenBanking(cfg)
 	result.configureInvestmentMarketData(cfg)
+	result.configureInvestmentResponseCache(cfg)
 	result.configurePush(cfg)
 	return result
 }
 
 func (s *Service) Close() {
+	if s.investmentCache != nil {
+		_ = s.investmentCache.Close()
+	}
 	s.store.Close()
 }
 
