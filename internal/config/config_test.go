@@ -25,6 +25,7 @@ func TestLoadRequiresSecretsAndParsesOverrides(t *testing.T) {
 	t.Setenv("MIGRATION_TIMEOUT", "4m")
 	t.Setenv("TRUSTED_PROXY_CIDRS", "10.42.0.0/16, 10.8.0.0/24")
 	t.Setenv("TRUSTED_PROXY_HOPS", "1")
+	t.Setenv("REDIS_URL", "rediss://cache.example:6380/2")
 
 	cfg, err := Load()
 	if err != nil {
@@ -33,8 +34,19 @@ func TestLoadRequiresSecretsAndParsesOverrides(t *testing.T) {
 	if cfg.JWTTTL != 2*time.Hour || cfg.DBMaxConns != 12 || cfg.DBMinConns != 3 {
 		t.Fatalf("unexpected parsed config: %#v", cfg)
 	}
-	if cfg.RequestBodyLimit != 4096 || cfg.MigrationTimeout != 4*time.Minute || len(cfg.TrustedProxyCIDRs) != 2 || cfg.TrustedProxyHops != 1 {
+	if cfg.RequestBodyLimit != 4096 || cfg.MigrationTimeout != 4*time.Minute || len(cfg.TrustedProxyCIDRs) != 2 || cfg.TrustedProxyHops != 1 || cfg.RedisURL != "rediss://cache.example:6380/2" {
 		t.Fatalf("unexpected HTTP config: %#v", cfg)
+	}
+}
+
+func TestLoadRejectsInvalidRedisURL(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("DATABASE_URL", "postgres://money:money@localhost/money")
+	t.Setenv("JWT_SECRET", strings.Repeat("s", 32))
+	t.Setenv("REDIS_URL", "https://cache.example")
+
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "REDIS_URL") {
+		t.Fatalf("invalid Redis URL error = %v", err)
 	}
 }
 
@@ -179,7 +191,7 @@ func TestLoadAcceptsBase64FCMServiceAccount(t *testing.T) {
 func clearConfigEnvironment(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
-		"PORT", "DATABASE_URL", "JWT_SECRET", "JWT_ISSUER", "JWT_AUDIENCE", "JWT_TTL", "JWT_LEGACY_ACCEPT_UNTIL",
+		"PORT", "DATABASE_URL", "REDIS_URL", "JWT_SECRET", "JWT_ISSUER", "JWT_AUDIENCE", "JWT_TTL", "JWT_LEGACY_ACCEPT_UNTIL",
 		"DB_MAX_CONNS", "DB_MIN_CONNS", "DB_MAX_CONN_LIFETIME", "DB_MAX_CONN_IDLE_TIME",
 		"DB_HEALTH_CHECK_PERIOD", "STARTUP_TIMEOUT", "MIGRATION_TIMEOUT", "SHUTDOWN_TIMEOUT", "HTTP_READ_HEADER_TIMEOUT",
 		"HTTP_READ_TIMEOUT", "HTTP_WRITE_TIMEOUT", "HTTP_IDLE_TIMEOUT", "REQUEST_BODY_LIMIT_BYTES",

@@ -45,6 +45,24 @@ func (s *Service) InvestmentPortfolioHistory(
 	if !ok {
 		return model.InvestmentPortfolioHistory{}, apperrors.Validation("range must be 1m, 3m, or 1y")
 	}
+	cacheKey := investmentPortfolioHistoryCacheKey(userID, rangeValue)
+	var cached model.InvestmentPortfolioHistory
+	if s.loadInvestmentResponse(ctx, cacheKey, &cached) {
+		return cached, nil
+	}
+	result, err := s.investmentPortfolioHistory(ctx, userID, rangeValue, days)
+	if err == nil {
+		s.storeInvestmentResponse(ctx, cacheKey, result)
+	}
+	return result, err
+}
+
+func (s *Service) investmentPortfolioHistory(
+	ctx context.Context,
+	userID int,
+	rangeValue string,
+	days int,
+) (model.InvestmentPortfolioHistory, error) {
 	result := model.InvestmentPortfolioHistory{
 		Points:   make([]model.InvestmentPortfolioHistoryPoint, 0, days+1),
 		Currency: supportedCurrency, Range: rangeValue,

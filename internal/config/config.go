@@ -12,6 +12,7 @@ const minimumJWTSecretBytes = 32
 type Config struct {
 	Port                           string
 	DatabaseURL                    string
+	RedisURL                       string
 	JWTSecret                      string
 	JWTIssuer                      string
 	JWTAudience                    string

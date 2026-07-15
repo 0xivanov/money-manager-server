@@ -20,6 +20,19 @@ type investmentLedgerPosition struct {
 }
 
 func (s *Service) InvestmentPortfolio(ctx context.Context, userID int) (model.InvestmentPortfolio, error) {
+	cacheKey := investmentPortfolioCacheKey(userID)
+	var cached model.InvestmentPortfolio
+	if s.loadInvestmentResponse(ctx, cacheKey, &cached) {
+		return cached, nil
+	}
+	portfolio, err := s.investmentPortfolio(ctx, userID)
+	if err == nil {
+		s.storeInvestmentResponse(ctx, cacheKey, portfolio)
+	}
+	return portfolio, err
+}
+
+func (s *Service) investmentPortfolio(ctx context.Context, userID int) (model.InvestmentPortfolio, error) {
 	trades, err := s.store.ListInvestmentTrades(ctx, userID, repository.InvestmentTradeFilter{Limit: maximumInvestmentTradeRows + 1})
 	if err != nil {
 		return model.InvestmentPortfolio{}, apperrors.Internal(fmt.Errorf("list portfolio trades: %w", err))

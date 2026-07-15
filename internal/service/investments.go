@@ -90,6 +90,7 @@ func (s *Service) CreateInvestmentTrade(
 	if err != nil {
 		return model.InvestmentTrade{}, apperrors.Internal(fmt.Errorf("create investment trade: %w", err))
 	}
+	s.invalidateInvestmentResponses(ctx, userID)
 	return item, nil
 }
 
@@ -158,5 +159,6 @@ func (s *Service) DeleteInvestmentTrade(ctx context.Context, userID, tradeID int
 	if err != nil {
 		return apperrors.Internal(fmt.Errorf("delete investment trade: %w", err))
 	}
+	s.invalidateInvestmentResponses(ctx, userID)
 	return nil
 }

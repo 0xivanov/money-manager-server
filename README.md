@@ -48,6 +48,7 @@ go run ./cmd/server
 | --- | --- | --- |
 | `PORT` | `8080` | HTTP listen port. |
 | `DATABASE_URL` | required | PostgreSQL URL. Production should use a private endpoint and TLS where available. |
+| `REDIS_URL` | unset | Optional `redis://` or `rediss://` URL used for user-scoped investment portfolio and history response caching. Successful entries expire after exactly five minutes and trade writes evict the user's entries. |
 | `JWT_SECRET` | required | JWT signing key, at least 32 bytes. |
 | `JWT_ISSUER` | `money-manager-api` | Required token issuer. |
 | `JWT_AUDIENCE` | `money-manager-mobile` | Required token audience. |
