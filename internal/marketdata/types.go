@@ -25,6 +25,10 @@ type Provider interface {
 	DailyHistory(ctx context.Context, symbol, currency string, since time.Time) ([]DailyClose, error)
 }
 
+type DailyHistoryProvider interface {
+	DailyHistory(ctx context.Context, symbol, currency string, since time.Time) ([]DailyClose, error)
+}
+
 type Quote struct {
 	Symbol   string
 	Currency string

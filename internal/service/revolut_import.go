@@ -13,7 +13,10 @@ import (
 
 	"money-manager-server/internal/apperrors"
 	"money-manager-server/internal/model"
+	"money-manager-server/internal/repository"
 )
+
+const revolutImportCategoryHeader = "money manager category"
 
 func (s *Service) ImportRevolutCSV(ctx context.Context, userID int, contents []byte) (model.ImportResult, error) {
 	reader := csv.NewReader(bytes.NewReader(bytes.TrimPrefix(contents, []byte{0xEF, 0xBB, 0xBF})))
@@ -49,7 +52,7 @@ func (s *Service) ImportRevolutCSV(ctx context.Context, userID int, contents []b
 	}
 	imports := make([]model.ImportedTransaction, 0, len(records)-1)
 	ignored := 0
-	importCategories := make(map[string]string, 2)
+	importCategories := make(map[string]string, 16)
 	for rowIndex, record := range records[1:] {
 		if len(record) == 1 && strings.TrimSpace(record[0]) == "" {
 			ignored++
@@ -64,6 +67,10 @@ func (s *Service) ImportRevolutCSV(ctx context.Context, userID int, contents []b
 		}
 		state := strings.ToUpper(field("state"))
 		if state != "" && state != "COMPLETED" {
+			ignored++
+			continue
+		}
+		if isRevolutTopUpCSVType(field("type")) {
 			ignored++
 			continue
 		}
@@ -96,16 +103,30 @@ func (s *Service) ImportRevolutCSV(ctx context.Context, userID int, contents []b
 		if descriptionErr != nil {
 			return model.ImportResult{}, apperrors.Validation(fmt.Sprintf("row %d has an invalid description", rowIndex+2))
 		}
-		category, ok := importCategories[transactionType]
+		requestedCategory := strings.ToLower(field(revolutImportCategoryHeader))
+		if requestedCategory == "" {
+			requestedCategory = classifyOpenBankingTransaction(transactionType, "", description).Category
+		}
+		categoryCacheKey := transactionType + "\x00" + requestedCategory
+		category, ok := importCategories[categoryCacheKey]
 		if !ok {
 			var categoryErr error
-			category, categoryErr = s.store.FindActiveCategoryName(ctx, userID, transactionType, "other")
+			category, categoryErr = s.store.FindActiveCategoryName(ctx, userID, transactionType, requestedCategory)
+			if errors.Is(categoryErr, repository.ErrNotFound) {
+				return model.ImportResult{}, apperrors.Validation(fmt.Sprintf("row %d uses an unavailable category", rowIndex+2))
+			}
 			if categoryErr != nil {
 				return model.ImportResult{}, apperrors.Internal(fmt.Errorf("find import category: %w", categoryErr))
 			}
-			importCategories[transactionType] = category
+			importCategories[categoryCacheKey] = category
 		}
-		hash := sha256.Sum256([]byte(strings.Join(record, "\x1f")))
+		fingerprintRecord := record
+		if categoryIndex, hasCategory := headers[revolutImportCategoryHeader]; hasCategory && categoryIndex < len(record) {
+			fingerprintRecord = make([]string, 0, len(record)-1)
+			fingerprintRecord = append(fingerprintRecord, record[:categoryIndex]...)
+			fingerprintRecord = append(fingerprintRecord, record[categoryIndex+1:]...)
+		}
+		hash := sha256.Sum256([]byte(strings.Join(fingerprintRecord, "\x1f")))
 		imports = append(imports, model.ImportedTransaction{
 			Request: model.TransactionRequest{
 				Type: transactionType, Category: category, Description: description,
@@ -122,6 +143,21 @@ func (s *Service) ImportRevolutCSV(ctx context.Context, userID int, contents []b
 		return model.ImportResult{}, apperrors.Internal(fmt.Errorf("import transactions: %w", err))
 	}
 	return model.ImportResult{Imported: imported, Skipped: skipped, Ignored: ignored}, nil
+}
+
+func isRevolutTopUpCSVType(value string) bool {
+	value = strings.ToUpper(strings.TrimSpace(value))
+	value = strings.NewReplacer("-", "_", " ", "_").Replace(value)
+	value = strings.Join(strings.FieldsFunc(value, func(character rune) bool {
+		return character == '_'
+	}), "_")
+	switch value {
+	case "TOPUP", "TOP_UP", "CARD_TOPUP", "CARD_TOP_UP",
+		"TOPUP_RETURN", "TOP_UP_RETURN", "CARD_TOPUP_RETURN", "CARD_TOP_UP_RETURN":
+		return true
+	default:
+		return false
+	}
 }
 
 func isZeroCSVAmount(value string) bool {

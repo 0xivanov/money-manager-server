@@ -105,6 +105,15 @@ func (r *Repository) ImportTransactions(ctx context.Context, userID int, transac
 		if tag.RowsAffected() == 1 {
 			imported++
 		} else {
+			if request.Category != "other" {
+				if _, err := tx.Exec(ctx, `UPDATE transactions
+					SET category=$1,updated_at=now()
+					WHERE user_id=$2 AND import_source='revolut' AND import_fingerprint=$3
+						AND lower(category)='other'`,
+					request.Category, userID, transaction.Fingerprint); err != nil {
+					return 0, 0, err
+				}
+			}
 			skipped++
 		}
 	}

@@ -215,7 +215,10 @@ func (s *Service) ListTransactionScheduleOccurrences(
 		return nil, apperrors.Validation("schedule_id must be a positive integer")
 	}
 	status = strings.ToLower(strings.TrimSpace(status))
-	if status != "" && status != "planned" && status != "posted" && status != "skipped" {
+	if status == "" {
+		status = "planned"
+	}
+	if status != "planned" && status != "posted" && status != "skipped" {
 		return nil, apperrors.Validation("status must be planned, posted, or skipped")
 	}
 	items, err := s.store.ListTransactionScheduleOccurrences(ctx, userID, repository.ScheduleOccurrenceFilter{

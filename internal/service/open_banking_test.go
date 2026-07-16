@@ -289,7 +289,7 @@ func TestSyncOpenBankingAccountPaginatesNormalizesAndPersists(t *testing.T) {
 	if requests != 2 || result.Fetched != 3 || result.Imported != 2 || result.Ignored != 1 || len(stored) != 2 {
 		t.Fatalf("sync result = %#v, requests=%d, stored=%#v", result, requests, stored)
 	}
-	if stored[0].Type != "expense" || stored[0].Category != "food" || stored[0].Amount != "42.80" || stored[0].Description != "Fresh Market" {
+	if stored[0].Type != "expense" || stored[0].Category != "groceries" || stored[0].Amount != "42.80" || stored[0].Description != "Fresh Market" {
 		t.Fatalf("expense seed = %#v", stored[0])
 	}
 	if stored[1].Type != "income" || stored[1].Category != "salary" || stored[1].Amount != "3200.00" {
@@ -335,7 +335,7 @@ func TestNormalizeOpenBankingTransactionAcceptsStringAndNumericMCC(t *testing.T)
 			"creditor":{"name":"Unknown merchant"}
 		}`)
 		item, ok := normalizeOpenBankingTransaction(raw, today)
-		if !ok || item.Category != "food" {
+		if !ok || item.Category != "groceries" {
 			t.Fatalf("MCC %s normalized transaction = %#v, included=%v", merchantCategoryCode, item, ok)
 		}
 		var metadata map[string]any
@@ -364,7 +364,21 @@ func TestNormalizeOpenBankingTransactionUsesRevolutFriendlyKeywordFallbacks(t *t
 			providerFields: `"creditor":{"name":"Revolut"},
 				"remittance_information":["Card payment to LIDL Bulgaria"]`,
 			indicator:        "DBIT",
-			expectedCategory: "food",
+			expectedCategory: "groceries",
+			expectedSource:   openBankingCategorySourceExpenseKeyword,
+		},
+		{
+			name:             "restaurant merchant name",
+			providerFields:   `"creditor":{"name":"Local restaurant"}`,
+			indicator:        "DBIT",
+			expectedCategory: "dining_out",
+			expectedSource:   openBankingCategorySourceExpenseKeyword,
+		},
+		{
+			name:             "shisha lounge merchant name",
+			providerFields:   `"merchant_category_code":"5812","creditor":{"name":"Downtown Shisha Lounge"}`,
+			indicator:        "DBIT",
+			expectedCategory: "going_out",
 			expectedSource:   openBankingCategorySourceExpenseKeyword,
 		},
 		{
@@ -372,6 +386,13 @@ func TestNormalizeOpenBankingTransactionUsesRevolutFriendlyKeywordFallbacks(t *t
 			providerFields:   `"creditor":{"name":"BOLT.EU ride"}`,
 			indicator:        "DBIT",
 			expectedCategory: "transport",
+			expectedSource:   openBankingCategorySourceExpenseKeyword,
+		},
+		{
+			name:             "beauty merchant name",
+			providerFields:   `"creditor":{"name":"Downtown Barber Shop"}`,
+			indicator:        "DBIT",
+			expectedCategory: "beauty",
 			expectedSource:   openBankingCategorySourceExpenseKeyword,
 		},
 		{
@@ -405,6 +426,47 @@ func TestNormalizeOpenBankingTransactionUsesRevolutFriendlyKeywordFallbacks(t *t
 				t.Fatalf("classification metadata = %#v", metadata)
 			}
 		})
+	}
+}
+
+func TestNormalizeOpenBankingTransactionIgnoresOnlyRevolutTopUps(t *testing.T) {
+	today := time.Date(2026, 7, 13, 0, 0, 0, 0, time.UTC)
+	topUp := json.RawMessage(`{
+		"entry_reference":"top-up",
+		"transaction_amount":{"currency":"EUR","amount":"500"},
+		"credit_debit_indicator":"CRDT",
+		"status":"BOOK",
+		"booking_date":"2026-07-12",
+		"remittance_information":["Card top-up by bank card"]
+	}`)
+	if item, included := normalizeOpenBankingTransactionForInstitution(topUp, today, "Revolut"); included {
+		t.Fatalf("Revolut top-up was included: %#v", item)
+	}
+	topUpReturn := json.RawMessage(`{
+		"entry_reference":"top-up-return",
+		"transaction_amount":{"currency":"EUR","amount":"-500"},
+		"credit_debit_indicator":"DBIT",
+		"status":"BOOK",
+		"booking_date":"2026-07-12",
+		"remittance_information":["Top-up return"]
+	}`)
+	if item, included := normalizeOpenBankingTransactionForInstitution(topUpReturn, today, "Revolut"); included {
+		t.Fatalf("Revolut top-up return was included: %#v", item)
+	}
+	if item, included := normalizeOpenBankingTransactionForInstitution(topUp, today, "Another Bank"); !included || item.Category != "other" {
+		t.Fatalf("other-bank income = %#v, included=%v", item, included)
+	}
+
+	salary := json.RawMessage(`{
+		"entry_reference":"salary",
+		"transaction_amount":{"currency":"EUR","amount":"3000"},
+		"credit_debit_indicator":"CRDT",
+		"status":"BOOK",
+		"booking_date":"2026-07-12",
+		"debtor":{"name":"ACME monthly salary"}
+	}`)
+	if item, included := normalizeOpenBankingTransactionForInstitution(salary, today, "Revolut"); !included || item.Category != "salary" {
+		t.Fatalf("salary = %#v, included=%v", item, included)
 	}
 }
 

@@ -155,7 +155,7 @@ Categories:
 
 Transactions:
 
-- `GET /transactions?month=2026-07&type=expense&category=food`
+- `GET /transactions?month=2026-07&type=expense&category=groceries`
 - `POST /transactions`
 - `PUT /transactions/{id}`
 - `DELETE /transactions/{id}`
@@ -169,7 +169,7 @@ Planning and notifications:
 - `GET|PUT|DELETE /schedules/{id}`
 - `POST /schedules/{id}/pause`
 - `POST /schedules/{id}/resume`
-- `GET /schedule-occurrences?from=2026-07-01&through=2026-07-31`
+- `GET /schedule-occurrences?from=2026-07-01&through=2026-07-31` (defaults to `status=planned`; use `status=posted` or `status=skipped` explicitly for history)
 - `GET|POST /budgets`
 - `GET|PUT|DELETE /budgets/{id}`
 - `GET|PUT /notification-preferences`
@@ -179,7 +179,7 @@ Planning and notifications:
 Investments:
 
 - `GET /investments/portfolio`
-- `GET /investments/portfolio/history?range=1y` (`1m`, `3m`, or `1y`)
+- `GET /investments/portfolio/history?range=1y` (`1m`, `3m`, `1y`, `2y`, `5y`, or `max`)
 - `GET|POST /investments/trades`
 - `DELETE /investments/trades/{id}`
 - `PUT /investments/prices` (deprecated, legacy stock records only; crypto prices are automatic)
@@ -229,7 +229,7 @@ Linking a Revolut account manually in the Enable Banking control panel only acti
 
 CSV exports are limited to an inclusive 366-day range and 5,000 transactions. Requests over either limit return HTTP 400 and must be narrowed. This keeps the pre-encoded CSV response below a predictable memory bound.
 
-Revolut imports accept up to 2 MiB and 5,000 rows. Completed EUR rows are imported into the `other` expense or income category according to the amount sign. Pending, reverted, zero-value, and non-EUR rows are ignored. A stable source fingerprint makes overlapping or repeated statement imports idempotent.
+Revolut imports accept up to 2 MiB and 5,000 rows. Completed EUR rows are categorized from a validated optional `Money Manager Category` column supplied by the iOS on-device classifier, then by the server's deterministic merchant rules, with `other` as the fallback. Pending, reverted, zero-value, non-EUR, and Revolut top-up rows are ignored. Linked Revolut account sync also ignores incoming transactions explicitly identified as card top-ups or cash deposits. A stable source fingerprint excludes the optional annotation, so overlapping and repeated statement imports remain idempotent. Re-importing can upgrade an existing `other` row to a classified category without overwriting a category the user already selected.
 
 Protected endpoints require:
 

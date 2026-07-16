@@ -17,10 +17,15 @@ import (
 const defaultInvestmentHistoryRange = "1y"
 
 var investmentHistoryRangeDays = map[string]int{
-	"1m": 30,
-	"3m": 90,
-	"1y": 365,
+	"1m":  30,
+	"3m":  90,
+	"1y":  365,
+	"2y":  730,
+	"5y":  1825,
+	"max": 0,
 }
+
+const maximumInvestmentHistoryResponsePoints = 500
 
 type historyLedgerPosition struct {
 	quantity *big.Rat
@@ -43,7 +48,7 @@ func (s *Service) InvestmentPortfolioHistory(
 	}
 	days, ok := investmentHistoryRangeDays[rangeValue]
 	if !ok {
-		return model.InvestmentPortfolioHistory{}, apperrors.Validation("range must be 1m, 3m, or 1y")
+		return model.InvestmentPortfolioHistory{}, apperrors.Validation("range must be 1m, 3m, 1y, 2y, 5y, or max")
 	}
 	cacheKey := investmentPortfolioHistoryCacheKey(userID, rangeValue)
 	var cached model.InvestmentPortfolioHistory
@@ -63,8 +68,12 @@ func (s *Service) investmentPortfolioHistory(
 	rangeValue string,
 	days int,
 ) (model.InvestmentPortfolioHistory, error) {
+	capacity := days + 1
+	if capacity <= 0 || capacity > maximumInvestmentHistoryResponsePoints {
+		capacity = maximumInvestmentHistoryResponsePoints
+	}
 	result := model.InvestmentPortfolioHistory{
-		Points:   make([]model.InvestmentPortfolioHistoryPoint, 0, days+1),
+		Points:   make([]model.InvestmentPortfolioHistoryPoint, 0, capacity),
 		Currency: supportedCurrency, Range: rangeValue,
 	}
 	trades, err := s.store.ListInvestmentTrades(ctx, userID, repository.InvestmentTradeFilter{
@@ -95,7 +104,10 @@ func (s *Service) investmentPortfolioHistory(
 		return model.InvestmentPortfolioHistory{}, apperrors.Internal(err)
 	}
 	now := s.now().UTC().Truncate(time.Second)
-	start := utcDay(now.AddDate(0, 0, -days))
+	start := utcDay(ordered[0].at)
+	if days > 0 {
+		start = utcDay(now.AddDate(0, 0, -days))
+	}
 	if firstDay := utcDay(ordered[0].at); firstDay.After(start) {
 		start = firstDay
 	}
@@ -144,7 +156,33 @@ func (s *Service) investmentPortfolioHistory(
 		AsOf: now.Format(time.RFC3339), Value: formatRat(currentValue, 2),
 		InvestedAmount: formatRat(currentBasis, 2),
 	})
+	result.Points = sampleInvestmentHistoryPoints(result.Points, maximumInvestmentHistoryResponsePoints)
 	return result, nil
+}
+
+func sampleInvestmentHistoryPoints(
+	points []model.InvestmentPortfolioHistoryPoint,
+	limit int,
+) []model.InvestmentPortfolioHistoryPoint {
+	if limit < 2 || len(points) <= limit {
+		return points
+	}
+	lastIndex := len(points) - 1
+	step := float64(lastIndex) / float64(limit-1)
+	result := make([]model.InvestmentPortfolioHistoryPoint, 0, limit)
+	previousIndex := -1
+	for sampleIndex := 0; sampleIndex < limit; sampleIndex++ {
+		index := int(float64(sampleIndex)*step + 0.5)
+		if sampleIndex == limit-1 {
+			index = lastIndex
+		}
+		if index == previousIndex {
+			continue
+		}
+		result = append(result, points[index])
+		previousIndex = index
+	}
+	return result
 }
 
 func timedInvestmentTrades(trades []model.InvestmentTrade) ([]timedInvestmentTrade, error) {

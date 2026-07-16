@@ -82,7 +82,7 @@ func TestInvestmentPortfolioHistoryCacheSeparatesNormalizedRanges(t *testing.T) 
 	cache := newFakeInvestmentResponseCache()
 	service.investmentCache = cache
 
-	for _, rangeValue := range []string{"", "1Y", "1m", "1M"} {
+	for _, rangeValue := range []string{"", "1Y", "1m", "1M", "2y", "2Y", "5y", "MAX", "max"} {
 		history, err := service.InvestmentPortfolioHistory(context.Background(), 7, rangeValue)
 		if err != nil {
 			t.Fatalf("range %q: %v", rangeValue, err)
@@ -91,10 +91,10 @@ func TestInvestmentPortfolioHistoryCacheSeparatesNormalizedRanges(t *testing.T) 
 			t.Fatalf("range %q returned %q", rangeValue, history.Range)
 		}
 	}
-	if listCalls != 2 {
-		t.Fatalf("history computations = %d, want 2", listCalls)
+	if listCalls != 5 {
+		t.Fatalf("history computations = %d, want 5", listCalls)
 	}
-	if len(cache.entries) != 2 {
+	if len(cache.entries) != 5 {
 		t.Fatalf("history cache entries = %#v", cache.entries)
 	}
 }

@@ -63,6 +63,9 @@ func (c *redisInvestmentResponseCache) InvalidateUser(ctx context.Context, userI
 		investmentPortfolioHistoryCacheKey(userID, "1m"),
 		investmentPortfolioHistoryCacheKey(userID, "3m"),
 		investmentPortfolioHistoryCacheKey(userID, "1y"),
+		investmentPortfolioHistoryCacheKey(userID, "2y"),
+		investmentPortfolioHistoryCacheKey(userID, "5y"),
+		investmentPortfolioHistoryCacheKey(userID, "max"),
 	}
 	return c.client.Unlink(ctx, keys...).Err()
 }

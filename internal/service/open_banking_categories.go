@@ -23,10 +23,16 @@ type openBankingCategoryKeywordRule struct {
 }
 
 var openBankingExpenseKeywordRules = []openBankingCategoryKeywordRule{
-	{category: "food", keywords: []string{
+	{category: "going_out", keywords: []string{
+		"shisha", "hookah", "nightclub", "night club", "cocktail", "lounge",
+		"club entry", "club ticket",
+	}},
+	{category: "groceries", keywords: []string{
 		"lidl", "kaufland", "billa", "fantastico", "t-market", "supermarket", "grocery",
+	}},
+	{category: "dining_out", keywords: []string{
 		"restaurant", "cafe", "coffee", "bakery", "takeaway", "glovo", "wolt", "deliveroo",
-		"mcdonald", "kfc",
+		"mcdonald", "kfc", "happy bar",
 	}},
 	{category: "transport", keywords: []string{
 		"uber", "bolt", "taxi", "metro", "subway", "bus ticket", "tram", "railway", "train ticket",
@@ -52,6 +58,11 @@ var openBankingExpenseKeywordRules = []openBankingCategoryKeywordRule{
 	{category: "education", keywords: []string{
 		"university", "school fee", "tuition", "online course", "udemy", "coursera",
 	}},
+	{category: "beauty", keywords: []string{
+		"barber", "barbershop", "hair salon", "hairdresser", "haircut", "beauty salon",
+		"nail salon", "nails", "manicure", "pedicure", "cosmetics", "makeup", "skin care",
+		"skincare", "eyebrow", "brow studio", "lash studio", "waxing", "sephora", "douglas parfumerie",
+	}},
 	{category: "shopping", keywords: []string{
 		"amazon", "ebay", "etsy", "shopping mall", "retail", "clothing", "fashion", "zara", "ikea",
 		"dm drogerie",
@@ -74,6 +85,10 @@ func classifyOpenBankingTransaction(transactionType, merchantCategoryCode, descr
 		return openBankingCategoryClassification{Category: "other", Source: openBankingCategorySourceFallback}
 	}
 
+	// Specific nightlife descriptions are more precise than generic restaurant MCCs.
+	if category := openBankingKeywordCategory(description, openBankingExpenseKeywordRules[:1]); category != "" {
+		return openBankingCategoryClassification{Category: category, Source: openBankingCategorySourceExpenseKeyword}
+	}
 	if category := openBankingMCCCategory(merchantCategoryCode); category != "" {
 		return openBankingCategoryClassification{Category: category, Source: openBankingCategorySourceMCC}
 	}
@@ -101,9 +116,12 @@ func openBankingMCCCategory(value string) string {
 		return ""
 	}
 	switch {
-	case code == 5411 || code == 5422 || code == 5441 || code == 5451 || code == 5462 || code == 5499 ||
-		code >= 5811 && code <= 5814:
-		return "food"
+	case code == 5411 || code == 5422 || code == 5441 || code == 5451 || code == 5462 || code == 5499:
+		return "groceries"
+	case code == 5813:
+		return "going_out"
+	case code == 5811 || code == 5812 || code == 5814:
+		return "dining_out"
 	case code == 4011 || code == 4111 || code == 4112 || code == 4121 || code == 4131 || code == 4789 ||
 		code == 5541 || code == 5542 || code == 7523:
 		return "transport"

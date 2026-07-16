@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -242,21 +243,24 @@ func TestExportTransactionsIsBounded(t *testing.T) {
 func TestImportRevolutCSVNormalizesAndIgnoresUnsupportedRows(t *testing.T) {
 	store := &fakeStore{
 		findCategory: func(_ context.Context, _ int, transactionType, name string) (string, error) {
-			if name != "other" {
-				t.Fatalf("category name = %q", name)
+			if transactionType == "expense" && name != "dining_out" {
+				t.Fatalf("expense category name = %q", name)
 			}
-			return "other", nil
+			if transactionType == "income" && name != "other" {
+				t.Fatalf("income category name = %q", name)
+			}
+			return name, nil
 		},
 		importTransactions: func(_ context.Context, userID int, transactions []model.ImportedTransaction) (int, int, error) {
 			if userID != 7 || len(transactions) != 2 {
 				t.Fatalf("import user/rows = %d/%d", userID, len(transactions))
 			}
 			expense := transactions[0]
-			if expense.Request.Type != "expense" || expense.Request.Amount != "12.34" || expense.Request.OccurredAt != "2026-07-11" || expense.Request.Description != "Coffee Shop" {
+			if expense.Request.Type != "expense" || expense.Request.Category != "dining_out" || expense.Request.Amount != "12.34" || expense.Request.OccurredAt != "2026-07-11" || expense.Request.Description != "Coffee Shop" {
 				t.Fatalf("expense = %#v", expense)
 			}
 			income := transactions[1]
-			if income.Request.Type != "income" || income.Request.Amount != "50.00" {
+			if income.Request.Type != "income" || income.Request.Category != "other" || income.Request.Amount != "50.00" {
 				t.Fatalf("income = %#v", income)
 			}
 			if expense.Fingerprint == "" || income.Fingerprint == "" || expense.Fingerprint == income.Fingerprint {
@@ -268,12 +272,76 @@ func TestImportRevolutCSVNormalizesAndIgnoresUnsupportedRows(t *testing.T) {
 	csv := "Type,Product,Started Date,Completed Date,Description,Amount,Fee,Currency,State,Balance\n" +
 		"CARD_PAYMENT,Current,2026-07-11 10:00:00,2026-07-11 10:01:00,Coffee Shop,-12.34,0,EUR,COMPLETED,100\n" +
 		"TRANSFER,Current,2026-07-12 09:00:00,2026-07-12 09:00:00,Friend,50,0,EUR,COMPLETED,150\n" +
+		"TOPUP,Current,2026-07-12 09:30:00,2026-07-12 09:30:00,Top up by bank card,500,0,EUR,COMPLETED,650\n" +
+		"TOPUP_RETURN,Current,2026-07-12 09:35:00,2026-07-12 09:35:00,Reverted top up,-500,0,EUR,COMPLETED,150\n" +
 		"CARD_PAYMENT,Current,2026-07-12 10:00:00,,Pending Shop,-4,0,EUR,PENDING,146\n" +
 		"CARD_PAYMENT,Current,2026-07-12 11:00:00,2026-07-12 11:00:00,Dollar Shop,-5,0,USD,COMPLETED,141\n"
 
 	result, err := testService(store).ImportRevolutCSV(context.Background(), 7, []byte(csv))
-	if err != nil || result != (model.ImportResult{Imported: 1, Skipped: 1, Ignored: 2}) {
+	if err != nil || result != (model.ImportResult{Imported: 1, Skipped: 1, Ignored: 4}) {
 		t.Fatalf("ImportRevolutCSV() = %#v, %v", result, err)
+	}
+}
+
+func TestImportRevolutCSVTopUpRuleKeepsSalaryTransfers(t *testing.T) {
+	store := &fakeStore{
+		findCategory: func(_ context.Context, _ int, transactionType, name string) (string, error) {
+			if transactionType != "income" || name != "salary" {
+				t.Fatalf("category lookup = %q/%q", transactionType, name)
+			}
+			return name, nil
+		},
+		importTransactions: func(_ context.Context, _ int, transactions []model.ImportedTransaction) (int, int, error) {
+			if len(transactions) != 1 || transactions[0].Request.Description != "Monthly salary" {
+				t.Fatalf("transactions = %#v", transactions)
+			}
+			return 1, 0, nil
+		},
+	}
+	csv := "Type,Started Date,Completed Date,Description,Amount,Currency,State\n" +
+		"CARD_TOP_UP,2026-07-01 08:00:00,2026-07-01 08:00:00,Card top up,500,EUR,COMPLETED\n" +
+		"TOPUP_RETURN,2026-07-01 08:30:00,2026-07-01 08:30:00,Top up return,-500,EUR,COMPLETED\n" +
+		"TRANSFER,2026-07-01 09:00:00,2026-07-01 09:00:00,Monthly salary,3000,EUR,COMPLETED\n"
+
+	result, err := testService(store).ImportRevolutCSV(context.Background(), 7, []byte(csv))
+	if err != nil || result != (model.ImportResult{Imported: 1, Ignored: 2}) {
+		t.Fatalf("ImportRevolutCSV() = %#v, %v", result, err)
+	}
+}
+
+func TestImportRevolutCSVUsesMobileCategoryWithoutChangingFingerprint(t *testing.T) {
+	var fingerprints []string
+	var categories []string
+	store := &fakeStore{
+		findCategory: func(_ context.Context, _ int, transactionType, name string) (string, error) {
+			if transactionType != "expense" || (name != "other" && name != "shopping") {
+				t.Fatalf("category lookup = %q/%q", transactionType, name)
+			}
+			return name, nil
+		},
+		importTransactions: func(_ context.Context, _ int, transactions []model.ImportedTransaction) (int, int, error) {
+			if len(transactions) != 1 {
+				t.Fatalf("transactions = %#v", transactions)
+			}
+			fingerprints = append(fingerprints, transactions[0].Fingerprint)
+			categories = append(categories, transactions[0].Request.Category)
+			return 1, 0, nil
+		},
+	}
+	baseHeader := "Type,Started Date,Completed Date,Description,Amount,Currency,State"
+	baseRow := "CARD_PAYMENT,2026-07-11 10:00:00,2026-07-11 10:01:00,Unfamiliar Store,-12.34,EUR,COMPLETED"
+	if _, err := testService(store).ImportRevolutCSV(context.Background(), 7, []byte(baseHeader+"\n"+baseRow+"\n")); err != nil {
+		t.Fatalf("base import: %v", err)
+	}
+	annotated := baseHeader + ",Money Manager Category\n" + baseRow + ",shopping\n"
+	if _, err := testService(store).ImportRevolutCSV(context.Background(), 7, []byte(annotated)); err != nil {
+		t.Fatalf("annotated import: %v", err)
+	}
+	if len(fingerprints) != 2 || fingerprints[0] != fingerprints[1] {
+		t.Fatalf("fingerprints = %#v", fingerprints)
+	}
+	if len(categories) != 2 || categories[0] != "other" || categories[1] != "shopping" {
+		t.Fatalf("categories = %#v", categories)
 	}
 }
 
@@ -365,6 +433,45 @@ func TestCreateTransactionScheduleRejectsInvalidRecurrence(t *testing.T) {
 		if _, err := service.CreateTransactionSchedule(context.Background(), 1, request); apperrors.KindOf(err) != apperrors.KindValidation {
 			t.Errorf("request %#v error = %v", request, err)
 		}
+	}
+}
+
+func TestListTransactionScheduleOccurrencesDefaultsToPlanned(t *testing.T) {
+	store := &fakeStore{
+		listScheduleOccurrences: func(_ context.Context, userID int, filter repository.ScheduleOccurrenceFilter) ([]model.TransactionScheduleOccurrence, error) {
+			if userID != 7 {
+				t.Fatalf("user id = %d", userID)
+			}
+			if filter.Status != "planned" {
+				t.Fatalf("status = %q, want planned", filter.Status)
+			}
+			return []model.TransactionScheduleOccurrence{}, nil
+		},
+	}
+
+	_, err := testService(store).ListTransactionScheduleOccurrences(
+		context.Background(), 7, "2026-07-15", "2026-10-13", 0, "",
+	)
+	if err != nil {
+		t.Fatalf("ListTransactionScheduleOccurrences() error = %v", err)
+	}
+}
+
+func TestListTransactionScheduleOccurrencesKeepsExplicitStatus(t *testing.T) {
+	store := &fakeStore{
+		listScheduleOccurrences: func(_ context.Context, _ int, filter repository.ScheduleOccurrenceFilter) ([]model.TransactionScheduleOccurrence, error) {
+			if filter.Status != "skipped" {
+				t.Fatalf("status = %q, want skipped", filter.Status)
+			}
+			return []model.TransactionScheduleOccurrence{}, nil
+		},
+	}
+
+	_, err := testService(store).ListTransactionScheduleOccurrences(
+		context.Background(), 7, "2026-07-15", "2026-10-13", 0, " SKIPPED ",
+	)
+	if err != nil {
+		t.Fatalf("ListTransactionScheduleOccurrences() error = %v", err)
 	}
 }
 
@@ -652,6 +759,58 @@ func TestInvestmentPortfolioHistoryValuesDailyHoldingsAndCurrentPrice(t *testing
 	}
 }
 
+func TestInvestmentPortfolioMaxHistoryStartsAtFirstTradeAndCapsResponse(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	firstTrade := time.Date(2021, 5, 8, 10, 0, 0, 0, time.UTC)
+	var requestedSince time.Time
+	store := &fakeStore{listInvestmentTrades: func(
+		context.Context, int, repository.InvestmentTradeFilter,
+	) ([]model.InvestmentTrade, error) {
+		return []model.InvestmentTrade{{
+			ID: 1, AssetType: "crypto", Symbol: "BTC", Broker: "manual", Side: "buy",
+			Amount: "100.00", Quantity: "0.002", PricePerUnit: "50000", Fees: "0",
+			OccurredAt: firstTrade.Format(time.RFC3339),
+		}}, nil
+	}}
+	service := testService(store)
+	service.now = func() time.Time { return now }
+	service.marketData = &fakeInvestmentMarketData{
+		dailyHistory: func(_ context.Context, _ string, _ string, since time.Time) ([]investmentMarketHistoryPoint, error) {
+			requestedSince = since
+			return []investmentMarketHistoryPoint{{Price: "50000", AsOf: since}}, nil
+		},
+		currentQuotes: func(context.Context, []string, string) (map[string]investmentMarketQuote, error) {
+			return map[string]investmentMarketQuote{"BTC": {Price: "60000", Provider: "kraken", AsOf: now}}, nil
+		},
+	}
+
+	history, err := service.InvestmentPortfolioHistory(context.Background(), 7, "MAX")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if history.Range != "max" || len(history.Points) != maximumInvestmentHistoryResponsePoints {
+		t.Fatalf("history range/count = %q/%d", history.Range, len(history.Points))
+	}
+	wantSince := time.Date(2021, 5, 7, 0, 0, 0, 0, time.UTC)
+	if !requestedSince.Equal(wantSince) {
+		t.Fatalf("history since = %s, want %s", requestedSince, wantSince)
+	}
+	if history.Points[0].AsOf != "2021-05-08T23:59:59Z" || history.Points[len(history.Points)-1].AsOf != now.Format(time.RFC3339) {
+		t.Fatalf("history bounds = %q to %q", history.Points[0].AsOf, history.Points[len(history.Points)-1].AsOf)
+	}
+}
+
+func TestSampleInvestmentHistoryPointsKeepsBounds(t *testing.T) {
+	points := make([]model.InvestmentPortfolioHistoryPoint, 1200)
+	for index := range points {
+		points[index] = model.InvestmentPortfolioHistoryPoint{AsOf: fmt.Sprintf("point-%04d", index)}
+	}
+	sampled := sampleInvestmentHistoryPoints(points, 500)
+	if len(sampled) != 500 || sampled[0].AsOf != points[0].AsOf || sampled[len(sampled)-1].AsOf != points[len(points)-1].AsOf {
+		t.Fatalf("sampled bounds/count = %d, %q to %q", len(sampled), sampled[0].AsOf, sampled[len(sampled)-1].AsOf)
+	}
+}
+
 type fakeInvestmentMarketData struct {
 	quoteAt       func(context.Context, string, string, time.Time) (investmentMarketQuote, error)
 	currentQuotes func(context.Context, []string, string) (map[string]investmentMarketQuote, error)
@@ -705,6 +864,7 @@ type fakeStore struct {
 	getTransactionSchedule          func(context.Context, int, int, time.Time) (model.TransactionSchedule, error)
 	upsertScheduleOccurrences       func(context.Context, []repository.ScheduleOccurrenceSeed) (int, error)
 	markScheduleMaterialized        func(context.Context, int, time.Time) error
+	listScheduleOccurrences         func(context.Context, int, repository.ScheduleOccurrenceFilter) ([]model.TransactionScheduleOccurrence, error)
 	createOpenBankingAuthorization  func(context.Context, repository.NewOpenBankingAuthorization) (int, error)
 	setOpenBankingProviderID        func(context.Context, int, string) error
 	claimOpenBankingAuthorization   func(context.Context, string, time.Time) (repository.OpenBankingAuthorizationRecord, error)
@@ -837,7 +997,10 @@ func (f *fakeStore) MarkTransactionScheduleMaterializedThrough(ctx context.Conte
 	}
 	return nil
 }
-func (*fakeStore) ListTransactionScheduleOccurrences(context.Context, int, repository.ScheduleOccurrenceFilter) ([]model.TransactionScheduleOccurrence, error) {
+func (f *fakeStore) ListTransactionScheduleOccurrences(ctx context.Context, userID int, filter repository.ScheduleOccurrenceFilter) ([]model.TransactionScheduleOccurrence, error) {
+	if f.listScheduleOccurrences != nil {
+		return f.listScheduleOccurrences(ctx, userID, filter)
+	}
 	return []model.TransactionScheduleOccurrence{}, nil
 }
 func (*fakeStore) PostDueTransactionScheduleOccurrences(context.Context, time.Time, int) (int, error) {

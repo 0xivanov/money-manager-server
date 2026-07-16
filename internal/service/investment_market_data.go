@@ -27,7 +27,9 @@ type investmentMarketDataClient interface {
 }
 
 type krakenInvestmentMarketData struct {
-	provider marketdata.Provider
+	provider            marketdata.Provider
+	longHistoryProvider marketdata.DailyHistoryProvider
+	now                 func() time.Time
 }
 
 func (s *Service) configureInvestmentMarketData(cfg config.Config) {
@@ -40,8 +42,19 @@ func (s *Service) configureInvestmentMarketData(cfg config.Config) {
 		Now:              s.now,
 		OperationTimeout: timeout,
 	})
-	if err == nil {
-		s.marketData = &krakenInvestmentMarketData{provider: client}
+	if err != nil {
+		return
+	}
+	longHistoryClient, historyErr := marketdata.NewCoinbaseHistory(marketdata.CoinbaseHistoryConfig{
+		HTTPClient:       &http.Client{Timeout: timeout},
+		Now:              s.now,
+		OperationTimeout: timeout,
+	})
+	if historyErr != nil {
+		longHistoryClient = nil
+	}
+	s.marketData = &krakenInvestmentMarketData{
+		provider: client, longHistoryProvider: longHistoryClient, now: s.now,
 	}
 }
 
@@ -82,7 +95,11 @@ func (k *krakenInvestmentMarketData) DailyHistory(
 	currency string,
 	since time.Time,
 ) ([]investmentMarketHistoryPoint, error) {
-	points, err := k.provider.DailyHistory(ctx, symbol, currency, since)
+	historyProvider := marketdata.DailyHistoryProvider(k.provider)
+	if k.longHistoryProvider != nil && since.Before(k.now().UTC().AddDate(0, 0, -700)) {
+		historyProvider = k.longHistoryProvider
+	}
+	points, err := historyProvider.DailyHistory(ctx, symbol, currency, since)
 	if err != nil {
 		return nil, err
 	}

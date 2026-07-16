@@ -81,7 +81,9 @@ func (s *Service) SyncOpenBankingAccount(
 			)
 		}
 		for _, raw := range page.Transactions {
-			seed, include := normalizeOpenBankingTransaction(raw, today)
+			seed, include := normalizeOpenBankingTransactionForInstitution(
+				raw, today, account.Account.InstitutionName,
+			)
 			if !include {
 				result.Ignored++
 				continue
@@ -196,6 +198,14 @@ func normalizeOpenBankingTransaction(
 	raw json.RawMessage,
 	today time.Time,
 ) (repository.OpenBankingTransactionSeed, bool) {
+	return normalizeOpenBankingTransactionForInstitution(raw, today, "")
+}
+
+func normalizeOpenBankingTransactionForInstitution(
+	raw json.RawMessage,
+	today time.Time,
+	institutionName string,
+) (repository.OpenBankingTransactionSeed, bool) {
 	var transaction enableBankingTransaction
 	if len(raw) == 0 || json.Unmarshal(raw, &transaction) != nil {
 		return repository.OpenBankingTransactionSeed{}, false
@@ -226,6 +236,9 @@ func normalizeOpenBankingTransaction(
 		} else {
 			return repository.OpenBankingTransactionSeed{}, false
 		}
+	}
+	if isRevolutTopUpTransaction(institutionName, transaction) {
+		return repository.OpenBankingTransactionSeed{}, false
 	}
 	occurredAt := firstValidOpenBankingDate(
 		transaction.BookingDate, transaction.TransactionDate, transaction.ValueDate,
@@ -274,6 +287,29 @@ func normalizeOpenBankingTransaction(
 		Description: description, Amount: amount, Currency: currency,
 		OccurredAt: occurredAt, Status: status, Metadata: metadata,
 	}, true
+}
+
+func isRevolutTopUpTransaction(institutionName string, transaction enableBankingTransaction) bool {
+	if !strings.Contains(strings.ToLower(strings.TrimSpace(institutionName)), "revolut") {
+		return false
+	}
+	text := strings.ToLower(openBankingTransactionClassificationText(transaction, ""))
+	text = strings.Join(strings.Fields(strings.NewReplacer("-", " ", "_", " ").Replace(text)), " ")
+	for _, marker := range []string{
+		"card top up",
+		"card topup",
+		"top up by bank card",
+		"topup by bank card",
+		"top up return",
+		"topup return",
+		"cash deposit by bank card",
+		"cash deposit",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func openBankingMerchantCategoryCode(raw json.RawMessage) string {

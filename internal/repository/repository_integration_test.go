@@ -38,11 +38,11 @@ func TestRepositoryIntegration(t *testing.T) {
 		t.Fatalf("find user = %#v, %v", record, err)
 	}
 	categories, err := repo.ListCategories(ctx, user.ID, "expense")
-	if err != nil || len(categories) != 10 {
+	if err != nil || len(categories) != 13 {
 		t.Fatalf("expense categories = %d, %v", len(categories), err)
 	}
-	category, err := repo.FindActiveCategoryName(ctx, user.ID, "expense", "FOOD")
-	if err != nil || category != "food" {
+	category, err := repo.FindActiveCategoryName(ctx, user.ID, "expense", "GROCERIES")
+	if err != nil || category != "groceries" {
 		t.Fatalf("find category = %q, %v", category, err)
 	}
 
@@ -58,6 +58,34 @@ func TestRepositoryIntegration(t *testing.T) {
 	if err != nil || len(transactions) != 1 || transactions[0].ID != transaction.ID {
 		t.Fatalf("list transactions = %#v, %v", transactions, err)
 	}
+	importSeed := model.ImportedTransaction{
+		Request: model.TransactionRequest{
+			Type: "expense", Category: "other", Description: "Imported shop", Amount: "9.50",
+			Currency: "EUR", OccurredAt: "2026-07-12",
+		},
+		Fingerprint: "classifier-fingerprint",
+	}
+	if imported, skipped, err := repo.ImportTransactions(ctx, user.ID, []model.ImportedTransaction{importSeed}); err != nil || imported != 1 || skipped != 0 {
+		t.Fatalf("initial import = %d/%d, %v", imported, skipped, err)
+	}
+	importSeed.Request.Category = "shopping"
+	if imported, skipped, err := repo.ImportTransactions(ctx, user.ID, []model.ImportedTransaction{importSeed}); err != nil || imported != 0 || skipped != 1 {
+		t.Fatalf("classified duplicate import = %d/%d, %v", imported, skipped, err)
+	}
+	transactions, err = repo.ListTransactions(ctx, user.ID, TransactionFilter{From: monthStart, To: monthStart.AddDate(0, 1, 0)})
+	if err != nil {
+		t.Fatalf("list imported transactions: %v", err)
+	}
+	var classifiedImport *model.Transaction
+	for index := range transactions {
+		if transactions[index].Description == "Imported shop" {
+			classifiedImport = &transactions[index]
+			break
+		}
+	}
+	if classifiedImport == nil || classifiedImport.Category != "shopping" {
+		t.Fatalf("classified duplicate import = %#v", classifiedImport)
+	}
 	for range 2 {
 		if _, err := repo.CreateTransaction(ctx, user.ID, model.TransactionRequest{
 			Type: "income", Category: "salary", Amount: "999999999999.99", Currency: "EUR", OccurredAt: "2026-07-11",
@@ -66,7 +94,7 @@ func TestRepositoryIntegration(t *testing.T) {
 		}
 	}
 	summary, err := repo.Summary(ctx, user.ID, "2026-07", monthStart, monthStart.AddDate(0, 1, 0))
-	if err != nil || summary.Income != "1999999999999.98" || summary.Expense != "12.50" || summary.Balance != "1999999999987.48" {
+	if err != nil || summary.Income != "1999999999999.98" || summary.Expense != "22.00" || summary.Balance != "1999999999977.98" {
 		t.Fatalf("summary = %#v, %v", summary, err)
 	}
 	if _, err := repo.CreateTransaction(ctx, user.ID, model.TransactionRequest{
@@ -549,8 +577,8 @@ func TestOpenBankingCategoryMigrationBackfillsAndPreservesOverrides(t *testing.T
 	}
 
 	mccFood := readRecord("mcc-food")
-	if mccFood.category != "food" || mccFood.metadata["classification_source"] != "mcc" ||
-		mccFood.metadata["classified_category"] != "food" {
+	if mccFood.category != "groceries" || mccFood.metadata["classification_source"] != "mcc" ||
+		mccFood.metadata["classified_category"] != "groceries" {
 		t.Fatalf("MCC backfill = %#v", mccFood)
 	}
 	keywordTransport := readRecord("keyword-transport")
@@ -564,7 +592,7 @@ func TestOpenBankingCategoryMigrationBackfillsAndPreservesOverrides(t *testing.T
 	legacyAutomaticCategories := map[string]string{
 		"legacy-auto-salary":   "salary",
 		"legacy-auto-refund":   "refund",
-		"legacy-auto-food":     "food",
+		"legacy-auto-food":     "groceries",
 		"legacy-auto-shopping": "shopping",
 	}
 	for externalID, expectedCategory := range legacyAutomaticCategories {
@@ -584,7 +612,8 @@ func TestOpenBankingCategoryMigrationBackfillsAndPreservesOverrides(t *testing.T
 		t.Fatalf("explicit other override = %#v", overrideOther)
 	}
 	automaticFood := readRecord("automatic-food")
-	if automaticFood.category != "food" || automaticFood.metadata["classification_override"] != nil {
+	if automaticFood.category != "groceries" || automaticFood.metadata["classified_category"] != "groceries" ||
+		automaticFood.metadata["classification_override"] != nil {
 		t.Fatalf("existing automatic classification = %#v", automaticFood)
 	}
 	if fallbackOther := readRecord("fallback-other"); fallbackOther.category != "other" {
@@ -694,7 +723,7 @@ func TestLegacySchemaUpgradeQuarantinesInvalidRows(t *testing.T) {
 	if err := pool.QueryRow(ctx, "SELECT count(*) FROM schema_migrations").Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if users != 1 || categories != 1 || transactions != 1 || quarantined != 8 || versions != 11 {
+	if users != 1 || categories != 5 || transactions != 1 || quarantined != 8 || versions != 13 {
 		t.Fatalf("legacy upgrade counts users=%d categories=%d transactions=%d quarantined=%d versions=%d", users, categories, transactions, quarantined, versions)
 	}
 	var email, transactionType, category, currency string
@@ -704,7 +733,7 @@ func TestLegacySchemaUpgradeQuarantinesInvalidRows(t *testing.T) {
 	if err := pool.QueryRow(ctx, "SELECT type,category,currency FROM transactions").Scan(&transactionType, &category, &currency); err != nil {
 		t.Fatal(err)
 	}
-	if email != "valid@example.com" || transactionType != "expense" || category != "Food" || currency != "EUR" {
+	if email != "valid@example.com" || transactionType != "expense" || category != "groceries" || currency != "EUR" {
 		t.Fatalf("legacy values were not normalized safely: email=%q type=%q category=%q currency=%q", email, transactionType, category, currency)
 	}
 	if _, err := repo.CreateTransaction(ctx, 1, model.TransactionRequest{
