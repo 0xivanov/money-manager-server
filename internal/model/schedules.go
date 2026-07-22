@@ -57,9 +57,9 @@ type TransactionScheduleOccurrence struct {
 }
 
 type ScheduleMaintenanceResult struct {
-	Materialized        int `json:"materialized"`
-	Posted              int `json:"posted"`
-	ScheduleReminders   int `json:"schedule_reminders"`
-	BudgetAlerts        int `json:"budget_alerts"`
-	InvestmentReminders int `json:"investment_reminders"`
+	Materialized      int `json:"materialized"`
+	Posted            int `json:"posted"`
+	ScheduleReminders int `json:"schedule_reminders"`
+	BudgetAlerts      int `json:"budget_alerts"`
+	InvestmentPosted  int `json:"investment_posted"`
 }

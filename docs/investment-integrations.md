@@ -84,4 +84,4 @@ The integration should begin against the demo environment. Trading endpoints mus
 6. Show sync time, incomplete data, missing prices, and reconciliation differences in both mobile apps.
 7. Add audit logs, rate limits, provider health reporting, and an export that includes raw external IDs and fees.
 
-Do not add order placement, cancellation, transfers, withdrawals, or automatic trading. Scheduled investments in Money Manager should remain reminders until a separate, explicit trading product and security review is approved.
+Do not add order placement, cancellation, transfers, withdrawals, or automatic trading. Scheduled investments create synthetic portfolio buy records from auditable Kraken or Marketstack reference prices. They never submit an order to a broker.

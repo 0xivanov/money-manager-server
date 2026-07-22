@@ -3,25 +3,26 @@ package model
 import "time"
 
 type InvestmentTrade struct {
-	ID             int    `json:"id"`
-	AssetType      string `json:"asset_type"`
-	Symbol         string `json:"symbol"`
-	AssetName      string `json:"asset_name"`
-	Exchange       string `json:"exchange,omitempty"`
-	MarketCurrency string `json:"market_currency"`
-	Broker         string `json:"broker"`
-	Side           string `json:"side"`
-	Amount         string `json:"amount"`
-	Quantity       string `json:"quantity"`
-	PricePerUnit   string `json:"price_per_unit"`
-	PriceProvider  string `json:"price_provider"`
-	PriceAsOf      string `json:"price_as_of"`
-	Fees           string `json:"fees"`
-	Currency       string `json:"currency"`
-	OccurredAt     string `json:"occurred_at"`
-	Notes          string `json:"notes"`
-	CreatedAt      string `json:"created_at"`
-	UpdatedAt      string `json:"updated_at"`
+	ID                   int    `json:"id"`
+	AssetType            string `json:"asset_type"`
+	Symbol               string `json:"symbol"`
+	AssetName            string `json:"asset_name"`
+	Exchange             string `json:"exchange,omitempty"`
+	MarketCurrency       string `json:"market_currency"`
+	Broker               string `json:"broker"`
+	Side                 string `json:"side"`
+	Amount               string `json:"amount"`
+	Quantity             string `json:"quantity"`
+	PricePerUnit         string `json:"price_per_unit"`
+	PriceProvider        string `json:"price_provider"`
+	PriceAsOf            string `json:"price_as_of"`
+	Fees                 string `json:"fees"`
+	Currency             string `json:"currency"`
+	OccurredAt           string `json:"occurred_at"`
+	Notes                string `json:"notes"`
+	ScheduleOccurrenceID *int   `json:"schedule_occurrence_id,omitempty"`
+	CreatedAt            string `json:"created_at"`
+	UpdatedAt            string `json:"updated_at"`
 }
 
 type InvestmentTradeRequest struct {
@@ -126,28 +127,30 @@ type InvestmentMarketHistoryPrice struct {
 }
 
 type InvestmentSchedule struct {
-	ID                int    `json:"id"`
-	UserID            int    `json:"-"`
-	AssetType         string `json:"asset_type"`
-	Symbol            string `json:"symbol"`
-	AssetName         string `json:"asset_name"`
-	Exchange          string `json:"exchange,omitempty"`
-	MarketCurrency    string `json:"market_currency"`
-	Broker            string `json:"broker"`
-	Amount            string `json:"amount"`
-	Currency          string `json:"currency"`
-	Frequency         string `json:"frequency"`
-	FrequencyInterval int    `json:"frequency_interval"`
-	StartDate         string `json:"start_date"`
-	EndDate           string `json:"end_date,omitempty"`
-	DayOfWeek         *int   `json:"day_of_week,omitempty"`
-	DayOfMonth        *int   `json:"day_of_month,omitempty"`
-	Timezone          string `json:"timezone"`
-	Status            string `json:"status"`
-	LastNotifiedOn    string `json:"last_notified_on,omitempty"`
-	NextOccurrence    string `json:"next_occurrence,omitempty"`
-	CreatedAt         string `json:"created_at"`
-	UpdatedAt         string `json:"updated_at"`
+	ID                  int    `json:"id"`
+	UserID              int    `json:"-"`
+	AssetType           string `json:"asset_type"`
+	Symbol              string `json:"symbol"`
+	AssetName           string `json:"asset_name"`
+	Exchange            string `json:"exchange,omitempty"`
+	MarketCurrency      string `json:"market_currency"`
+	Broker              string `json:"broker"`
+	Amount              string `json:"amount"`
+	Currency            string `json:"currency"`
+	Frequency           string `json:"frequency"`
+	FrequencyInterval   int    `json:"frequency_interval"`
+	StartDate           string `json:"start_date"`
+	EndDate             string `json:"end_date,omitempty"`
+	DayOfWeek           *int   `json:"day_of_week,omitempty"`
+	DayOfMonth          *int   `json:"day_of_month,omitempty"`
+	Timezone            string `json:"timezone"`
+	Status              string `json:"status"`
+	LastNotifiedOn      string `json:"last_notified_on,omitempty"`
+	MaterializedThrough string `json:"materialized_through,omitempty"`
+	LastPostedOn        string `json:"last_posted_on,omitempty"`
+	NextOccurrence      string `json:"next_occurrence,omitempty"`
+	CreatedAt           string `json:"created_at"`
+	UpdatedAt           string `json:"updated_at"`
 }
 
 type InvestmentScheduleRequest struct {

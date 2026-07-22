@@ -204,7 +204,13 @@ func normalizeUnsignedDecimal(value, field string, maximumIntegerDigits, maximum
 	fraction := ""
 	if len(parts) == 2 {
 		fraction = parts[1]
-		if fraction == "" || len(fraction) > maximumFractionDigits {
+		if fraction == "" {
+			return "", apperrors.Validation(fmt.Sprintf("%s must have at most %d decimal places", field, maximumFractionDigits))
+		}
+		// PostgreSQL returns fixed-scale NUMERIC values with trailing zeroes.
+		// Remove those zeroes before checking the value's meaningful precision.
+		fraction = strings.TrimRight(fraction, "0")
+		if len(fraction) > maximumFractionDigits {
 			return "", apperrors.Validation(fmt.Sprintf("%s must have at most %d decimal places", field, maximumFractionDigits))
 		}
 	}
@@ -215,7 +221,6 @@ func normalizeUnsignedDecimal(value, field string, maximumIntegerDigits, maximum
 	if len(integer) > maximumIntegerDigits {
 		return "", apperrors.Validation(field + " is too large")
 	}
-	fraction = strings.TrimRight(fraction, "0")
 	result := integer
 	if fraction != "" {
 		result += "." + fraction

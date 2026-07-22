@@ -8,7 +8,7 @@ Production-oriented Go API shared by the Money Manager Android and iOS applicati
 - Transaction and category CRUD scoped to the authenticated user
 - Daily, weekly, and monthly income and expense schedules with occurrence tracking
 - Category and total spending budgets with configurable warning thresholds
-- Amount-based BTC and ETH trade tracking with automatic Kraken reference pricing, portfolio history, reminders, and audit CSV export
+- Amount-based crypto and stock tracking with automatic reference pricing, scheduled synthetic buys, portfolio history, notifications, and audit CSV export
 - Notification preferences, push-device registration, and an outbox for budget, schedule, investment, and bank-spending events
 - Strict EUR amount, category, date, and request validation
 - Monthly summaries and date-range CSV export
@@ -311,12 +311,12 @@ docker buildx build --platform linux/arm64 -t money-manager-server:test .
 
 ## Production image and deployment
 
-Build and push a versioned ARM64 image, then inspect its manifest:
+Build and push a versioned image for the VPS and Raspberry Pi nodes, then inspect its manifest:
 
 ```bash
 VERSION=v0.1.0
 docker buildx build \
-  --platform linux/arm64 \
+  --platform linux/amd64,linux/arm64 \
   --build-arg VERSION="$VERSION" \
   --build-arg COMMIT="$(git rev-parse HEAD)" \
   --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -331,8 +331,8 @@ The checked-in `deployer.yml` targets:
 
 - App: `money-manager-api`
 - Route: `https://money.0xivanov.dev`
-- Two resilient Linux ARM64 replicas
-- One pod per Raspberry Pi
+- Three resilient replicas across AMD64 and ARM64
+- One pod on the VPS and one on each Raspberry Pi
 - PostgreSQL-backed `/readyz`
 - Encrypted deployer secrets for the database, JWT signing, and Enable Banking production credentials
 

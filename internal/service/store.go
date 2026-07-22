@@ -105,7 +105,10 @@ type investmentStore interface {
 	SetInvestmentScheduleStatus(context.Context, int, int, string) error
 	ArchiveInvestmentSchedule(context.Context, int, int) error
 	ListActiveInvestmentSchedules(context.Context) ([]model.InvestmentSchedule, error)
-	QueueInvestmentReminder(context.Context, model.InvestmentSchedule, time.Time) (bool, error)
+	UpsertInvestmentScheduleOccurrences(context.Context, []repository.InvestmentScheduleOccurrenceSeed) (int, error)
+	MarkInvestmentScheduleMaterializedThrough(context.Context, int, time.Time) error
+	ListDueInvestmentScheduleOccurrences(context.Context, time.Time, int) ([]repository.DueInvestmentScheduleOccurrence, error)
+	PostInvestmentScheduleOccurrence(context.Context, int, model.InvestmentTradeRequest) (model.InvestmentTrade, bool, error)
 }
 
 type openBankingStore interface {

@@ -266,11 +266,16 @@ func (s *Service) RunScheduledTransactionMaintenance(ctx context.Context) (model
 		return model.ScheduleMaintenanceResult{}, apperrors.Internal(fmt.Errorf("queue budget alerts: %w", err))
 	}
 	result.BudgetAlerts = budgetAlerts
-	investmentReminders, err := s.queueInvestmentReminders(ctx, now)
+	investmentMaterialized, err := s.materializeDueInvestmentSchedules(ctx, now)
 	if err != nil {
-		return model.ScheduleMaintenanceResult{}, apperrors.Internal(fmt.Errorf("queue investment reminders: %w", err))
+		return result, apperrors.Internal(fmt.Errorf("materialize investment schedules: %w", err))
 	}
-	result.InvestmentReminders = investmentReminders
+	result.Materialized += investmentMaterialized
+	investmentPosted, err := s.postDueInvestmentScheduleOccurrences(ctx, now)
+	result.InvestmentPosted = investmentPosted
+	if err != nil {
+		return result, apperrors.Internal(fmt.Errorf("post scheduled investments: %w", err))
+	}
 	return result, nil
 }
 

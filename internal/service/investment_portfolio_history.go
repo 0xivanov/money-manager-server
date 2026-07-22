@@ -266,7 +266,9 @@ func (s *Service) currentInvestmentHistoryQuote(
 func storedInvestmentHistoryPoints(prices []model.InvestmentMarketHistoryPrice) []investmentMarketHistoryPoint {
 	result := make([]investmentMarketHistoryPoint, 0, len(prices))
 	for _, price := range prices {
-		result = append(result, investmentMarketHistoryPoint{Price: price.Price, AsOf: utcDay(price.AsOf)})
+		result = append(result, investmentMarketHistoryPoint{
+			Price: price.Price, Provider: price.Provider, AsOf: utcDay(price.AsOf),
+		})
 	}
 	return result
 }

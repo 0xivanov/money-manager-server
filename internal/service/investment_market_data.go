@@ -16,8 +16,9 @@ type investmentMarketQuote struct {
 }
 
 type investmentMarketHistoryPoint struct {
-	Price string
-	AsOf  time.Time
+	Price    string
+	Provider string
+	AsOf     time.Time
 }
 
 type investmentMarketDataClient interface {
@@ -103,7 +104,9 @@ func (m *marketstackInvestmentHistory) DailyHistory(
 	}
 	result := make([]investmentMarketHistoryPoint, 0, len(points))
 	for _, point := range points {
-		result = append(result, investmentMarketHistoryPoint{Price: point.Close, AsOf: point.AsOf})
+		result = append(result, investmentMarketHistoryPoint{
+			Price: point.Close, Provider: marketdata.ProviderMarketstack, AsOf: point.AsOf,
+		})
 	}
 	return result, nil
 }

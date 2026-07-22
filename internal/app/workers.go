@@ -179,13 +179,13 @@ func runScheduledTransactionWorker(
 			}
 			return
 		}
-		if result.Materialized > 0 || result.Posted > 0 || result.ScheduleReminders > 0 || result.BudgetAlerts > 0 || result.InvestmentReminders > 0 {
+		if result.Materialized > 0 || result.Posted > 0 || result.ScheduleReminders > 0 || result.BudgetAlerts > 0 || result.InvestmentPosted > 0 {
 			logger.InfoContext(ctx, "scheduled transaction maintenance completed",
 				"materialized", result.Materialized,
 				"posted", result.Posted,
 				"schedule_reminders", result.ScheduleReminders,
 				"budget_alerts", result.BudgetAlerts,
-				"investment_reminders", result.InvestmentReminders,
+				"investment_posted", result.InvestmentPosted,
 			)
 		}
 	}

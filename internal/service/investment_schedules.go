@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"money-manager-server/internal/apperrors"
 	"money-manager-server/internal/model"
@@ -220,7 +219,7 @@ func (s *Service) decorateInvestmentSchedule(item model.InvestmentSchedule) (mod
 		return model.InvestmentSchedule{}, apperrors.Internal(fmt.Errorf("load investment schedule timezone: %w", err))
 	}
 	from := today
-	if item.LastNotifiedOn == today.Format("2006-01-02") {
+	if item.LastNotifiedOn == today.Format("2006-01-02") || item.LastPostedOn == today.Format("2006-01-02") {
 		from = from.AddDate(0, 0, 1)
 	}
 	rule, err := investmentRecurrenceRule(item)
@@ -235,40 +234,4 @@ func (s *Service) decorateInvestmentSchedule(item model.InvestmentSchedule) (mod
 		item.NextOccurrence = dates[0].Format("2006-01-02")
 	}
 	return item, nil
-}
-
-func (s *Service) queueInvestmentReminders(ctx context.Context, now time.Time) (int, error) {
-	items, err := s.store.ListActiveInvestmentSchedules(ctx)
-	if err != nil {
-		return 0, err
-	}
-	queued := 0
-	for _, item := range items {
-		today, err := scheduleLocalDate(now, item.Timezone)
-		if err != nil {
-			return queued, err
-		}
-		if item.LastNotifiedOn == today.Format("2006-01-02") {
-			continue
-		}
-		rule, err := investmentRecurrenceRule(item)
-		if err != nil {
-			return queued, err
-		}
-		dates, err := recurrence.Occurrences(rule, today, today)
-		if err != nil {
-			return queued, err
-		}
-		if len(dates) == 0 {
-			continue
-		}
-		inserted, err := s.store.QueueInvestmentReminder(ctx, item, today)
-		if err != nil {
-			return queued, err
-		}
-		if inserted {
-			queued++
-		}
-	}
-	return queued, nil
 }

@@ -50,13 +50,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
-      - name: Build ARM64 image
+      - name: Build multi-architecture image
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/arm64
+          platforms: linux/amd64,linux/arm64
           push: false
-          tags: money-manager-server:ci-arm64
+          tags: money-manager-server:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Start local stack

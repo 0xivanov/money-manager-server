@@ -604,6 +604,9 @@ func TestInvestmentDecimalAndIdentityValidation(t *testing.T) {
 	if value, err := normalizeUnsignedDecimal("000.0100000000", "quantity", 18, 10, false); err != nil || value != "0.01" {
 		t.Fatalf("normalized quantity = %q, %v", value, err)
 	}
+	if value, err := normalizeUnsignedDecimal("120.1234567800", "price", 12, 8, false); err != nil || value != "120.12345678" {
+		t.Fatalf("fixed-scale normalized price = %q, %v", value, err)
+	}
 	for _, value := range []string{"0", "-1", "1.00000000001", "1e2", ".5"} {
 		if _, err := normalizeUnsignedDecimal(value, "quantity", 18, 10, false); apperrors.KindOf(err) != apperrors.KindValidation {
 			t.Errorf("quantity %q error = %v", value, err)
@@ -1092,6 +1095,119 @@ func TestSampleInvestmentHistoryPointsKeepsBounds(t *testing.T) {
 	}
 }
 
+func TestScheduledInvestmentMaintenanceBackfillsCryptoBuy(t *testing.T) {
+	now := time.Date(2026, time.July, 22, 9, 0, 0, 0, time.UTC)
+	dueDate := time.Date(2026, time.July, 20, 0, 0, 0, 0, time.UTC)
+	schedule := model.InvestmentSchedule{
+		ID: 4, UserID: 7, AssetType: "crypto", Symbol: "BTC", AssetName: "Bitcoin",
+		MarketCurrency: "EUR", Broker: "manual", Amount: "50.00", Currency: "EUR",
+		Frequency: "weekly", FrequencyInterval: 1, StartDate: "2026-07-20",
+		DayOfWeek: intPointer(1), Timezone: "Europe/Sofia", Status: "active",
+	}
+	store := &fakeStore{}
+	store.listActiveInvestmentSchedules = func(context.Context) ([]model.InvestmentSchedule, error) {
+		return []model.InvestmentSchedule{schedule}, nil
+	}
+	store.upsertInvestmentOccurrences = func(_ context.Context, seeds []repository.InvestmentScheduleOccurrenceSeed) (int, error) {
+		if len(seeds) != 1 || seeds[0].ScheduleID != schedule.ID || !seeds[0].ScheduledFor.Equal(dueDate) {
+			t.Fatalf("materialized seeds = %#v", seeds)
+		}
+		return 1, nil
+	}
+	store.markInvestmentMaterialized = func(_ context.Context, scheduleID int, through time.Time) error {
+		if scheduleID != schedule.ID || through.Format("2006-01-02") != "2026-07-22" {
+			t.Fatalf("materialized through = %d/%s", scheduleID, through)
+		}
+		return nil
+	}
+	store.listDueInvestmentOccurrences = func(context.Context, time.Time, int) ([]repository.DueInvestmentScheduleOccurrence, error) {
+		return []repository.DueInvestmentScheduleOccurrence{{ID: 41, ScheduledFor: dueDate, Schedule: schedule}}, nil
+	}
+	store.postInvestmentOccurrence = func(_ context.Context, occurrenceID int, request model.InvestmentTradeRequest) (model.InvestmentTrade, bool, error) {
+		if occurrenceID != 41 || request.Side != "buy" || request.Amount != "50.00" ||
+			request.PricePerUnit != "50000" || request.Quantity != "0.001" ||
+			request.OccurredAt != "2026-07-20T00:00:00Z" {
+			t.Fatalf("scheduled crypto trade = %d %#v", occurrenceID, request)
+		}
+		return model.InvestmentTrade{ID: 88}, true, nil
+	}
+	service := testService(store)
+	service.now = func() time.Time { return now }
+	service.marketData = &fakeInvestmentMarketData{quoteAt: func(
+		_ context.Context, symbol, currency string, at time.Time,
+	) (investmentMarketQuote, error) {
+		if symbol != "BTC" || currency != "EUR" || at.Format(time.RFC3339) != "2026-07-20T00:00:00Z" {
+			t.Fatalf("crypto quote request = %s/%s at %s", symbol, currency, at)
+		}
+		return investmentMarketQuote{Price: "50000", Provider: "kraken", AsOf: at}, nil
+	}}
+
+	result, err := service.RunScheduledTransactionMaintenance(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Materialized != 1 || result.InvestmentPosted != 1 {
+		t.Fatalf("maintenance result = %#v", result)
+	}
+}
+
+func TestScheduledStockBuyUsesLatestAvailableClose(t *testing.T) {
+	now := time.Date(2026, time.July, 22, 9, 0, 0, 0, time.UTC)
+	dueDate := time.Date(2026, time.July, 20, 0, 0, 0, 0, time.UTC)
+	schedule := model.InvestmentSchedule{
+		ID: 4, UserID: 7, AssetType: "stock", Symbol: "MSTR", AssetName: "Strategy",
+		Exchange: "NASDAQ", MarketCurrency: "USD", Broker: "trading212",
+		Amount: "49.92", Currency: "EUR", Frequency: "weekly", FrequencyInterval: 1,
+		StartDate: "2026-07-20", DayOfWeek: intPointer(1), Timezone: "Europe/Sofia", Status: "active",
+	}
+	store := &fakeStore{}
+	store.listDueInvestmentOccurrences = func(context.Context, time.Time, int) ([]repository.DueInvestmentScheduleOccurrence, error) {
+		return []repository.DueInvestmentScheduleOccurrence{{ID: 42, ScheduledFor: dueDate, Schedule: schedule}}, nil
+	}
+	store.postInvestmentOccurrence = func(_ context.Context, occurrenceID int, request model.InvestmentTradeRequest) (model.InvestmentTrade, bool, error) {
+		if occurrenceID != 42 || request.Symbol != "MSTR" || request.Exchange != "NASDAQ" ||
+			request.PricePerUnit != "120" || request.Quantity != "0.416" || request.PriceProvider != "marketstack" {
+			t.Fatalf("scheduled stock trade = %d %#v", occurrenceID, request)
+		}
+		return model.InvestmentTrade{ID: 89}, true, nil
+	}
+	service := testService(store)
+	service.now = func() time.Time { return now }
+	service.stockHistoryData = &fakeStockInvestmentHistory{dailyHistory: func(
+		_ context.Context, instrument marketdata.EquityInstrument, currency string, _ time.Time,
+	) ([]investmentMarketHistoryPoint, error) {
+		if instrument.Symbol != "MSTR" || instrument.Exchange != "NASDAQ" || currency != "EUR" {
+			t.Fatalf("stock history request = %#v/%s", instrument, currency)
+		}
+		return []investmentMarketHistoryPoint{
+			{Price: "100", Provider: "marketstack", AsOf: time.Date(2026, time.July, 17, 0, 0, 0, 0, time.UTC)},
+			{Price: "120.0000000000", Provider: "marketstack", AsOf: time.Date(2026, time.July, 20, 0, 0, 0, 0, time.UTC)},
+		}, nil
+	}}
+
+	posted, err := service.postDueInvestmentScheduleOccurrences(context.Background(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if posted != 1 {
+		t.Fatalf("posted = %d", posted)
+	}
+}
+
+func TestScheduledInvestmentTimestampStaysOnScheduledUTCDay(t *testing.T) {
+	date := time.Date(2026, time.July, 20, 0, 0, 0, 0, time.UTC)
+	sofia, err := scheduledInvestmentTimestamp(date, "Europe/Sofia")
+	if err != nil || sofia.Format(time.RFC3339) != "2026-07-20T00:00:00Z" {
+		t.Fatalf("Sofia scheduled timestamp = %s, %v", sofia, err)
+	}
+	newYork, err := scheduledInvestmentTimestamp(date, "America/New_York")
+	if err != nil || newYork.Format(time.RFC3339) != "2026-07-20T04:00:00Z" {
+		t.Fatalf("New York scheduled timestamp = %s, %v", newYork, err)
+	}
+}
+
+func intPointer(value int) *int { return &value }
+
 type fakeInvestmentMarketData struct {
 	quoteAt       func(context.Context, string, string, time.Time) (investmentMarketQuote, error)
 	currentQuotes func(context.Context, []string, string) (map[string]investmentMarketQuote, error)
@@ -1193,6 +1309,11 @@ type fakeStore struct {
 	investmentHoldingQuantity       func(context.Context, int, string, string, string) (string, error)
 	listInvestmentMarketHistory     func(context.Context, string, string, string, string, time.Time) ([]model.InvestmentMarketHistoryPrice, error)
 	upsertInvestmentMarketHistory   func(context.Context, []model.InvestmentMarketHistoryPrice) error
+	listActiveInvestmentSchedules   func(context.Context) ([]model.InvestmentSchedule, error)
+	upsertInvestmentOccurrences     func(context.Context, []repository.InvestmentScheduleOccurrenceSeed) (int, error)
+	markInvestmentMaterialized      func(context.Context, int, time.Time) error
+	listDueInvestmentOccurrences    func(context.Context, time.Time, int) ([]repository.DueInvestmentScheduleOccurrence, error)
+	postInvestmentOccurrence        func(context.Context, int, model.InvestmentTradeRequest) (model.InvestmentTrade, bool, error)
 }
 
 func (f *fakeStore) ImportTransactions(ctx context.Context, userID int, transactions []model.ImportedTransaction) (int, int, error) {
@@ -1414,11 +1535,44 @@ func (*fakeStore) SetInvestmentScheduleStatus(context.Context, int, int, string)
 func (*fakeStore) ArchiveInvestmentSchedule(context.Context, int, int) error {
 	return repository.ErrNotFound
 }
-func (*fakeStore) ListActiveInvestmentSchedules(context.Context) ([]model.InvestmentSchedule, error) {
+
+func (f *fakeStore) ListActiveInvestmentSchedules(ctx context.Context) ([]model.InvestmentSchedule, error) {
+	if f.listActiveInvestmentSchedules != nil {
+		return f.listActiveInvestmentSchedules(ctx)
+	}
 	return []model.InvestmentSchedule{}, nil
 }
-func (*fakeStore) QueueInvestmentReminder(context.Context, model.InvestmentSchedule, time.Time) (bool, error) {
-	return false, nil
+func (f *fakeStore) UpsertInvestmentScheduleOccurrences(
+	ctx context.Context, seeds []repository.InvestmentScheduleOccurrenceSeed,
+) (int, error) {
+	if f.upsertInvestmentOccurrences != nil {
+		return f.upsertInvestmentOccurrences(ctx, seeds)
+	}
+	return 0, nil
+}
+func (f *fakeStore) MarkInvestmentScheduleMaterializedThrough(
+	ctx context.Context, scheduleID int, through time.Time,
+) error {
+	if f.markInvestmentMaterialized != nil {
+		return f.markInvestmentMaterialized(ctx, scheduleID, through)
+	}
+	return nil
+}
+func (f *fakeStore) ListDueInvestmentScheduleOccurrences(
+	ctx context.Context, now time.Time, limit int,
+) ([]repository.DueInvestmentScheduleOccurrence, error) {
+	if f.listDueInvestmentOccurrences != nil {
+		return f.listDueInvestmentOccurrences(ctx, now, limit)
+	}
+	return []repository.DueInvestmentScheduleOccurrence{}, nil
+}
+func (f *fakeStore) PostInvestmentScheduleOccurrence(
+	ctx context.Context, occurrenceID int, request model.InvestmentTradeRequest,
+) (model.InvestmentTrade, bool, error) {
+	if f.postInvestmentOccurrence != nil {
+		return f.postInvestmentOccurrence(ctx, occurrenceID, request)
+	}
+	return model.InvestmentTrade{}, false, nil
 }
 func (f *fakeStore) CreateOpenBankingAuthorization(ctx context.Context, record repository.NewOpenBankingAuthorization) (int, error) {
 	if f.createOpenBankingAuthorization != nil {

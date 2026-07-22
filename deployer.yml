@@ -1,5 +1,5 @@
 name: money-manager-api
-image: ghcr.io/0xivanov/money-manager-server@sha256:54e85dd3fbb5337887b63e2ce9a916defe3deec3d6e816c120dfe30f0430c27b
+image: ghcr.io/0xivanov/money-manager-server@sha256:099364941cfe2be3a5108455fa95a5eca330f29757517745761717c2655e78d1
 
 service:
   port: 8080
@@ -10,11 +10,11 @@ routing:
   domain: money.0xivanov.dev
 
 deploy:
-  replicas: 2
+  replicas: 3
   strategy: rolling
 
 placement:
-  arch: linux/arm64
+  arch: any
   spread: true
 
 secrets:

@@ -420,17 +420,44 @@ func TestRepositoryIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create investment schedule for reminder: %v", err)
 	}
-	queuedReminder, err := repo.QueueInvestmentReminder(ctx, investmentSchedule, monthStart)
-	if err != nil || !queuedReminder {
-		t.Fatalf("queue investment reminder = %t, %v", queuedReminder, err)
+	occurrenceDate := monthStart.AddDate(0, 0, 1)
+	insertedOccurrences, err := repo.UpsertInvestmentScheduleOccurrences(ctx, []InvestmentScheduleOccurrenceSeed{{
+		ScheduleID: investmentSchedule.ID, UserID: user.ID, ScheduledFor: occurrenceDate,
+	}})
+	if err != nil || insertedOccurrences != 1 {
+		t.Fatalf("upsert investment occurrences = %d, %v", insertedOccurrences, err)
 	}
-	var reminderPayloads int
+	if err := repo.MarkInvestmentScheduleMaterializedThrough(ctx, investmentSchedule.ID, occurrenceDate); err != nil {
+		t.Fatalf("mark investment schedule materialized: %v", err)
+	}
+	dueInvestments, err := repo.ListDueInvestmentScheduleOccurrences(ctx, occurrenceDate.Add(12*time.Hour), 10)
+	if err != nil || len(dueInvestments) != 1 || dueInvestments[0].Schedule.ID != investmentSchedule.ID {
+		t.Fatalf("due investment occurrences = %#v, %v", dueInvestments, err)
+	}
+	postedTrade, posted, err := repo.PostInvestmentScheduleOccurrence(ctx, dueInvestments[0].ID, model.InvestmentTradeRequest{
+		AssetType: "crypto", Symbol: "BTC", AssetName: "Bitcoin", MarketCurrency: "EUR",
+		Broker: "manual", Side: "buy", Amount: "25.00", Quantity: "0.0005",
+		PricePerUnit: "50000", PriceProvider: "kraken", PriceAsOf: occurrenceDate.Format(time.RFC3339),
+		Fees: "0", Currency: "EUR", OccurredAt: occurrenceDate.Format(time.RFC3339),
+		Notes: "Scheduled investment",
+	})
+	if err != nil || !posted || postedTrade.ScheduleOccurrenceID == nil ||
+		*postedTrade.ScheduleOccurrenceID != dueInvestments[0].ID {
+		t.Fatalf("post investment occurrence = %#v/%t, %v", postedTrade, posted, err)
+	}
+	if _, postedAgain, err := repo.PostInvestmentScheduleOccurrence(ctx, dueInvestments[0].ID, model.InvestmentTradeRequest{}); err != nil || postedAgain {
+		t.Fatalf("duplicate investment occurrence = %t, %v", postedAgain, err)
+	}
+	remainingDue, err := repo.ListDueInvestmentScheduleOccurrences(ctx, occurrenceDate.Add(12*time.Hour), 10)
+	if err != nil || len(remainingDue) != 0 {
+		t.Fatalf("remaining due investment occurrences = %#v, %v", remainingDue, err)
+	}
+	var postedNotifications int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM notification_outbox
-		WHERE user_id=$1 AND event_type='investment_reminder'
-			AND payload @> jsonb_build_object('investment_schedule_id',$2::bigint)`,
-		user.ID, investmentSchedule.ID,
-	).Scan(&reminderPayloads); err != nil || reminderPayloads != 1 {
-		t.Fatalf("investment reminder payloads = %d, %v", reminderPayloads, err)
+		WHERE event_type='scheduled_investment_posted'
+		  AND payload @> jsonb_build_object('investment_trade_id',$1::bigint)`, postedTrade.ID,
+	).Scan(&postedNotifications); err != nil || postedNotifications != 1 {
+		t.Fatalf("scheduled investment notifications = %d, %v", postedNotifications, err)
 	}
 }
 
@@ -796,7 +823,7 @@ func TestLegacySchemaUpgradeQuarantinesInvalidRows(t *testing.T) {
 	if err := pool.QueryRow(ctx, "SELECT count(*) FROM schema_migrations").Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if users != 1 || categories != 6 || transactions != 1 || quarantined != 8 || versions != 17 {
+	if users != 1 || categories != 6 || transactions != 1 || quarantined != 8 || versions != 18 {
 		t.Fatalf("legacy upgrade counts users=%d categories=%d transactions=%d quarantined=%d versions=%d", users, categories, transactions, quarantined, versions)
 	}
 	var email, transactionType, category, currency string
