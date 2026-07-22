@@ -1,5 +1,5 @@
 name: money-manager-api
-image: ghcr.io/0xivanov/money-manager-server@sha256:a3efbee5ea26c0122ed027d83de10c45c2676cdc9c391d2e130552f292bbe511
+image: ghcr.io/0xivanov/money-manager-server@sha256:54e85dd3fbb5337887b63e2ce9a916defe3deec3d6e816c120dfe30f0430c27b
 
 service:
   port: 8080
@@ -25,6 +25,10 @@ secrets:
   - ENABLE_BANKING_PRIVATE_KEY_BASE64
   - ENABLE_BANKING_CALLBACK_URL
   - ENABLE_BANKING_RESULT_REDIRECT_URL
+  - TRADING212_API_KEY
+  - TRADING212_API_SECRET
+  - TRADING212_OWNER_USER_ID
+  - MARKETSTACK_API_KEY
 
 state:
   mode: stateless

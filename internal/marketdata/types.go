@@ -11,6 +11,12 @@ import (
 
 const ProviderKraken = "kraken"
 
+type EquityInstrument struct {
+	Symbol         string
+	Exchange       string
+	MarketCurrency string
+}
+
 var (
 	ErrUnsupportedPair  = errors.New("unsupported market data pair")
 	ErrQuoteUnavailable = errors.New("market data quote unavailable")

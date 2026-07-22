@@ -10,6 +10,7 @@ import (
 
 	"money-manager-server/internal/apperrors"
 	"money-manager-server/internal/config"
+	"money-manager-server/internal/marketdata"
 	"money-manager-server/internal/model"
 	"money-manager-server/internal/repository"
 
@@ -172,6 +173,35 @@ func TestCreateTransactionRejectsInvalidMoneyAndCategory(t *testing.T) {
 	})
 	if apperrors.KindOf(err) != apperrors.KindValidation {
 		t.Fatalf("missing category error = %v", err)
+	}
+}
+
+func TestCreateInvestmentTransferExcludesSpendingAndLinksRevolutXSchedule(t *testing.T) {
+	scheduleID := 42
+	store := &fakeStore{
+		findCategory: func(context.Context, int, string, string) (string, error) {
+			return "investment_transfer", nil
+		},
+		getInvestmentSchedule: func(context.Context, int, int) (model.InvestmentSchedule, error) {
+			return model.InvestmentSchedule{ID: scheduleID, Broker: "revolut_x"}, nil
+		},
+		createTransaction: func(_ context.Context, _ int, request model.TransactionRequest) (model.Transaction, error) {
+			if request.Purpose != "investment_transfer" || !request.ExcludedFromBudget {
+				t.Fatalf("investment transfer was not normalized: %#v", request)
+			}
+			if request.InvestmentScheduleID == nil || *request.InvestmentScheduleID != scheduleID {
+				t.Fatalf("investment schedule link = %#v", request.InvestmentScheduleID)
+			}
+			return model.Transaction{ID: 1, Purpose: request.Purpose}, nil
+		},
+	}
+	service := testService(store)
+	transaction, err := service.CreateTransaction(context.Background(), 1, model.TransactionRequest{
+		Type: "expense", Category: "investment_transfer", Amount: "25", Currency: "EUR",
+		OccurredAt: "2026-07-18", Purpose: "investment_transfer", InvestmentScheduleID: &scheduleID,
+	})
+	if err != nil || transaction.Purpose != "investment_transfer" {
+		t.Fatalf("CreateTransaction() = %#v, %v", transaction, err)
 	}
 }
 
@@ -512,6 +542,64 @@ func TestCalculateInvestmentPortfolioDoesNotRequirePriceForClosedPosition(t *tes
 	}
 }
 
+func TestInvestmentPortfolioKeepsLedgerWhenStockPricingIsUnavailable(t *testing.T) {
+	store := &fakeStore{listInvestmentTrades: func(
+		_ context.Context, userID int, _ repository.InvestmentTradeFilter,
+	) ([]model.InvestmentTrade, error) {
+		if userID != 7 {
+			t.Fatalf("user ID = %d", userID)
+		}
+		return []model.InvestmentTrade{{
+			ID: 1, AssetType: "stock", Symbol: "QDVE", AssetName: "iShares S&P 500 IT",
+			Exchange: "XETRA", MarketCurrency: "EUR", Broker: "trading212", Side: "buy",
+			Amount: "100.00", Quantity: "2", PricePerUnit: "50", Fees: "1.00",
+			OccurredAt: "2026-07-17T07:05:10Z",
+		}}, nil
+	}}
+	service := testService(store)
+	service.stockMarketData = &fakeStockInvestmentMarketData{currentQuote: func(
+		context.Context, marketdata.EquityInstrument, string,
+	) (investmentMarketQuote, error) {
+		return investmentMarketQuote{}, errors.New("provider quota exhausted")
+	}}
+
+	portfolio, err := service.InvestmentPortfolio(context.Background(), 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if portfolio.InvestedAmount != "101.00" || portfolio.CurrentValue != "" ||
+		portfolio.UnrealizedProfit != "" || portfolio.MissingPrices != 1 {
+		t.Fatalf("portfolio = %#v", portfolio)
+	}
+	if len(portfolio.Positions) != 1 || portfolio.Positions[0].Symbol != "QDVE" ||
+		portfolio.Positions[0].Quantity != "2" || portfolio.Positions[0].PriceStatus != "missing" {
+		t.Fatalf("positions = %#v", portfolio.Positions)
+	}
+}
+
+func TestInvestmentPortfolioKeepsStockLedgerWhenProviderIsNotConfigured(t *testing.T) {
+	store := &fakeStore{listInvestmentTrades: func(
+		context.Context, int, repository.InvestmentTradeFilter,
+	) ([]model.InvestmentTrade, error) {
+		return []model.InvestmentTrade{{
+			ID: 1, AssetType: "stock", Symbol: "4GLD", AssetName: "Xetra-Gold",
+			Exchange: "XETRA", MarketCurrency: "EUR", Broker: "trading212", Side: "buy",
+			Amount: "20.00", Quantity: "0.16673614", PricePerUnit: "119.95", Fees: "0",
+			OccurredAt: "2026-06-17T07:05:06Z",
+		}}, nil
+	}}
+	service := testService(store)
+	service.stockMarketData = nil
+
+	portfolio, err := service.InvestmentPortfolio(context.Background(), 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if portfolio.InvestedAmount != "20.00" || portfolio.MissingPrices != 1 || len(portfolio.Positions) != 1 {
+		t.Fatalf("portfolio = %#v", portfolio)
+	}
+}
+
 func TestInvestmentDecimalAndIdentityValidation(t *testing.T) {
 	if value, err := normalizeUnsignedDecimal("000.0100000000", "quantity", 18, 10, false); err != nil || value != "0.01" {
 		t.Fatalf("normalized quantity = %q, %v", value, err)
@@ -650,6 +738,95 @@ func TestCreateInvestmentTradeDoesNotInsertWithoutMarketPrice(t *testing.T) {
 	}
 }
 
+func TestCreateStockTradeUsesTrading212ListingAndCurrency(t *testing.T) {
+	now := time.Date(2026, 7, 18, 15, 0, 0, 0, time.UTC)
+	var stored model.InvestmentTradeRequest
+	store := &fakeStore{createInvestmentTrade: func(
+		_ context.Context, _ int, request model.InvestmentTradeRequest,
+	) (model.InvestmentTrade, error) {
+		stored = request
+		return model.InvestmentTrade{ID: 12, AssetType: request.AssetType, Symbol: request.Symbol}, nil
+	}}
+	service := testService(store)
+	service.now = func() time.Time { return now }
+	service.stockMarketData = &fakeStockInvestmentMarketData{quoteAt: func(
+		_ context.Context, instrument marketdata.EquityInstrument, currency string, at time.Time,
+	) (investmentMarketQuote, error) {
+		if instrument.Symbol != "AAPL" || instrument.Exchange != "NASDAQ" || instrument.MarketCurrency != "USD" || currency != "EUR" {
+			t.Fatalf("instrument = %#v, currency = %s", instrument, currency)
+		}
+		return investmentMarketQuote{Price: "200", Provider: "trading212", AsOf: at}, nil
+	}}
+	_, err := service.CreateInvestmentTrade(context.Background(), 7, model.InvestmentTradeRequest{
+		AssetType: "stock", Symbol: "aapl", AssetName: "Apple", Exchange: "nasdaq",
+		MarketCurrency: "usd", Broker: "trading212", Side: "buy", Amount: "100",
+		OccurredAt: now.Add(-time.Hour).Format(time.RFC3339),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Exchange != "NASDAQ" || stored.MarketCurrency != "USD" || stored.Quantity != "0.5" || stored.PriceProvider != "trading212" {
+		t.Fatalf("stored = %#v", stored)
+	}
+}
+
+func TestCreateStockTradeRejectsNonTrading212Owner(t *testing.T) {
+	now := time.Date(2026, 7, 18, 15, 0, 0, 0, time.UTC)
+	inserted := false
+	store := &fakeStore{createInvestmentTrade: func(
+		context.Context, int, model.InvestmentTradeRequest,
+	) (model.InvestmentTrade, error) {
+		inserted = true
+		return model.InvestmentTrade{}, nil
+	}}
+	service := testService(store)
+	service.now = func() time.Time { return now }
+	service.stockMarketData = &fakeStockInvestmentMarketData{quoteAt: func(
+		context.Context, marketdata.EquityInstrument, string, time.Time,
+	) (investmentMarketQuote, error) {
+		t.Fatal("non-owner request reached Trading 212")
+		return investmentMarketQuote{}, nil
+	}}
+
+	_, err := service.CreateInvestmentTrade(context.Background(), 8, model.InvestmentTradeRequest{
+		AssetType: "stock", Symbol: "AAPL", AssetName: "Apple", Exchange: "NASDAQ",
+		MarketCurrency: "USD", Broker: "trading212", Side: "buy", Amount: "100",
+		OccurredAt: now.Add(-time.Hour).Format(time.RFC3339),
+	})
+	if apperrors.KindOf(err) != apperrors.KindUnavailable || inserted ||
+		!strings.Contains(err.Error(), "not available for this account") {
+		t.Fatalf("error = %v, inserted = %v", err, inserted)
+	}
+}
+
+func TestInvestmentPortfolioDoesNotUseTrading212ForNonOwner(t *testing.T) {
+	store := &fakeStore{listInvestmentTrades: func(
+		context.Context, int, repository.InvestmentTradeFilter,
+	) ([]model.InvestmentTrade, error) {
+		return []model.InvestmentTrade{{
+			ID: 1, AssetType: "stock", Symbol: "QDVE", AssetName: "iShares S&P 500 IT",
+			Exchange: "XETRA", MarketCurrency: "EUR", Broker: "trading212", Side: "buy",
+			Amount: "100.00", Quantity: "2", PricePerUnit: "50", Fees: "0",
+			OccurredAt: "2026-07-16T10:00:00Z",
+		}}, nil
+	}}
+	service := testService(store)
+	service.stockMarketData = &fakeStockInvestmentMarketData{currentQuote: func(
+		context.Context, marketdata.EquityInstrument, string,
+	) (investmentMarketQuote, error) {
+		t.Fatal("non-owner request reached Trading 212")
+		return investmentMarketQuote{}, nil
+	}}
+
+	portfolio, err := service.InvestmentPortfolio(context.Background(), 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(portfolio.Positions) != 1 || portfolio.Positions[0].PriceStatus != "missing" || portfolio.MissingPrices != 1 {
+		t.Fatalf("portfolio = %#v", portfolio)
+	}
+}
+
 func TestDeleteInvestmentTradeMapsAtomicRepositoryResult(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -757,6 +934,110 @@ func TestInvestmentPortfolioHistoryValuesDailyHoldingsAndCurrentPrice(t *testing
 		history.Points[2].AsOf != now.Format(time.RFC3339) {
 		t.Fatalf("history = %#v", history)
 	}
+	if len(history.Points[2].Holdings) != 1 || history.Points[2].Holdings[0].Symbol != "BTC" ||
+		history.Points[2].Holdings[0].Value != "108.00" {
+		t.Fatalf("holding history = %#v", history.Points[2].Holdings)
+	}
+}
+
+func TestInvestmentPortfolioHistoryIncludesAndCachesMarketstackStocks(t *testing.T) {
+	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	var cached []model.InvestmentMarketHistoryPrice
+	store := &fakeStore{
+		listInvestmentTrades: func(context.Context, int, repository.InvestmentTradeFilter) ([]model.InvestmentTrade, error) {
+			return []model.InvestmentTrade{{
+				ID: 1, AssetType: "stock", Symbol: "QDVE", AssetName: "iShares S&P 500 IT",
+				Exchange: "XETRA", MarketCurrency: "EUR", Broker: "trading212", Side: "buy",
+				Amount: "100.00", Quantity: "2", PricePerUnit: "50", Fees: "0",
+				OccurredAt: "2026-07-16T10:00:00Z",
+			}}, nil
+		},
+		listInvestmentMarketHistory: func(
+			context.Context, string, string, string, string, time.Time,
+		) ([]model.InvestmentMarketHistoryPrice, error) {
+			return append([]model.InvestmentMarketHistoryPrice(nil), cached...), nil
+		},
+		upsertInvestmentMarketHistory: func(_ context.Context, prices []model.InvestmentMarketHistoryPrice) error {
+			cached = append(cached, prices...)
+			return nil
+		},
+	}
+	service := testService(store)
+	service.now = func() time.Time { return now }
+	service.stockHistoryData = &fakeStockInvestmentHistory{dailyHistory: func(
+		_ context.Context, instrument marketdata.EquityInstrument, currency string, since time.Time,
+	) ([]investmentMarketHistoryPoint, error) {
+		if instrument.Symbol != "QDVE" || instrument.Exchange != "XETRA" || currency != "EUR" ||
+			since.Format("2006-01-02") != "2026-07-15" {
+			t.Fatalf("history request = %#v/%s/%s", instrument, currency, since)
+		}
+		return []investmentMarketHistoryPoint{
+			{Price: "50", AsOf: time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC)},
+			{Price: "52", AsOf: time.Date(2026, 7, 17, 0, 0, 0, 0, time.UTC)},
+		}, nil
+	}}
+	service.stockMarketData = &fakeStockInvestmentMarketData{currentQuote: func(
+		context.Context, marketdata.EquityInstrument, string,
+	) (investmentMarketQuote, error) {
+		return investmentMarketQuote{Price: "53", Provider: "trading212", AsOf: now}, nil
+	}}
+
+	history, err := service.InvestmentPortfolioHistory(context.Background(), 7, "1y")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if history.UnsupportedPositions != 0 || len(history.Points) != 3 || len(cached) != 2 {
+		t.Fatalf("history/cache = %#v/%#v", history, cached)
+	}
+	last := history.Points[len(history.Points)-1]
+	if last.Value != "106.00" || len(last.Holdings) != 1 || last.Holdings[0].Symbol != "QDVE" ||
+		last.Holdings[0].Value != "106.00" {
+		t.Fatalf("last history point = %#v", last)
+	}
+}
+
+func TestInvestmentPortfolioHistoryKeepsAvailableHoldingsWhenStockHistoryIsUnavailable(t *testing.T) {
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	store := &fakeStore{listInvestmentTrades: func(
+		context.Context, int, repository.InvestmentTradeFilter,
+	) ([]model.InvestmentTrade, error) {
+		return []model.InvestmentTrade{
+			{ID: 1, AssetType: "stock", Symbol: "WDI", AssetName: "Wirecard", Exchange: "XETRA", MarketCurrency: "EUR", Broker: "trading212", Side: "buy", Amount: "1.00", Quantity: "1", PricePerUnit: "1", Fees: "0", OccurredAt: "2026-07-10T10:00:00Z"},
+			{ID: 2, AssetType: "stock", Symbol: "WDI", AssetName: "Wirecard", Exchange: "XETRA", MarketCurrency: "EUR", Broker: "trading212", Side: "sell", Amount: "0.01", Quantity: "1", PricePerUnit: "0.01", Fees: "0", OccurredAt: "2026-07-11T10:00:00Z"},
+			{ID: 3, AssetType: "crypto", Symbol: "BTC", AssetName: "Bitcoin", Broker: "manual", Side: "buy", Amount: "100.00", Quantity: "0.002", PricePerUnit: "50000", Fees: "0", OccurredAt: "2026-07-12T10:00:00Z"},
+			{ID: 4, AssetType: "stock", Symbol: "QDVE", AssetName: "iShares S&P 500 IT", Exchange: "XETRA", MarketCurrency: "EUR", Broker: "trading212", Side: "buy", Amount: "50.00", Quantity: "1", PricePerUnit: "50", Fees: "0", OccurredAt: "2026-07-12T11:00:00Z"},
+		}, nil
+	}}
+	service := testService(store)
+	service.now = func() time.Time { return now }
+	service.marketData = &fakeInvestmentMarketData{
+		dailyHistory: func(context.Context, string, string, time.Time) ([]investmentMarketHistoryPoint, error) {
+			return []investmentMarketHistoryPoint{
+				{Price: "50000", AsOf: time.Date(2026, 7, 12, 0, 0, 0, 0, time.UTC)},
+				{Price: "51000", AsOf: time.Date(2026, 7, 13, 0, 0, 0, 0, time.UTC)},
+			}, nil
+		},
+		currentQuotes: func(context.Context, []string, string) (map[string]investmentMarketQuote, error) {
+			return map[string]investmentMarketQuote{"BTC": {Price: "52000", Provider: "kraken", AsOf: now}}, nil
+		},
+	}
+	service.stockHistoryData = &fakeStockInvestmentHistory{dailyHistory: func(
+		context.Context, marketdata.EquityInstrument, string, time.Time,
+	) ([]investmentMarketHistoryPoint, error) {
+		return nil, errors.New("listing has no usable history")
+	}}
+
+	history, err := service.InvestmentPortfolioHistory(context.Background(), 7, "1y")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if history.UnsupportedPositions != 1 || len(history.Points) != 3 {
+		t.Fatalf("history = %#v", history)
+	}
+	last := history.Points[len(history.Points)-1]
+	if last.Value != "104.00" || len(last.Holdings) != 1 || last.Holdings[0].Symbol != "BTC" {
+		t.Fatalf("last history point = %#v", last)
+	}
 }
 
 func TestInvestmentPortfolioMaxHistoryStartsAtFirstTradeAndCapsResponse(t *testing.T) {
@@ -817,6 +1098,32 @@ type fakeInvestmentMarketData struct {
 	dailyHistory  func(context.Context, string, string, time.Time) ([]investmentMarketHistoryPoint, error)
 }
 
+type fakeStockInvestmentMarketData struct {
+	quoteAt      func(context.Context, marketdata.EquityInstrument, string, time.Time) (investmentMarketQuote, error)
+	currentQuote func(context.Context, marketdata.EquityInstrument, string) (investmentMarketQuote, error)
+}
+
+type fakeStockInvestmentHistory struct {
+	dailyHistory func(context.Context, marketdata.EquityInstrument, string, time.Time) ([]investmentMarketHistoryPoint, error)
+}
+
+func (f *fakeStockInvestmentHistory) DailyHistory(
+	ctx context.Context, instrument marketdata.EquityInstrument, currency string, since time.Time,
+) ([]investmentMarketHistoryPoint, error) {
+	return f.dailyHistory(ctx, instrument, currency, since)
+}
+
+func (f *fakeStockInvestmentMarketData) QuoteAt(ctx context.Context, instrument marketdata.EquityInstrument, currency string, at time.Time) (investmentMarketQuote, error) {
+	return f.quoteAt(ctx, instrument, currency, at)
+}
+
+func (f *fakeStockInvestmentMarketData) CurrentQuote(ctx context.Context, instrument marketdata.EquityInstrument, currency string) (investmentMarketQuote, error) {
+	if f.currentQuote == nil {
+		return investmentMarketQuote{}, errors.New("unexpected stock CurrentQuote call")
+	}
+	return f.currentQuote(ctx, instrument, currency)
+}
+
 func (f *fakeInvestmentMarketData) QuoteAt(
 	ctx context.Context, symbol, currency string, at time.Time,
 ) (investmentMarketQuote, error) {
@@ -847,7 +1154,7 @@ func (f *fakeInvestmentMarketData) DailyHistory(
 func testService(store Store) *Service {
 	cfg := config.Config{
 		JWTSecret: strings.Repeat("s", 32), JWTIssuer: "money-manager-api",
-		JWTAudience: "money-manager-mobile", JWTTTL: time.Hour,
+		JWTAudience: "money-manager-mobile", JWTTTL: time.Hour, Trading212OwnerUserID: 7,
 	}
 	return NewWithStore(store, cfg)
 }
@@ -880,9 +1187,12 @@ type fakeStore struct {
 	completeNotificationDelivery    func(context.Context, int, bool, bool, bool, string, time.Time, time.Time) error
 	deleteUser                      func(context.Context, int) error
 	createInvestmentTrade           func(context.Context, int, model.InvestmentTradeRequest) (model.InvestmentTrade, error)
+	getInvestmentSchedule           func(context.Context, int, int) (model.InvestmentSchedule, error)
 	listInvestmentTrades            func(context.Context, int, repository.InvestmentTradeFilter) ([]model.InvestmentTrade, error)
 	deleteInvestmentTrade           func(context.Context, int, int) error
 	investmentHoldingQuantity       func(context.Context, int, string, string, string) (string, error)
+	listInvestmentMarketHistory     func(context.Context, string, string, string, string, time.Time) ([]model.InvestmentMarketHistoryPrice, error)
+	upsertInvestmentMarketHistory   func(context.Context, []model.InvestmentMarketHistoryPrice) error
 }
 
 func (f *fakeStore) ImportTransactions(ctx context.Context, userID int, transactions []model.ImportedTransaction) (int, int, error) {
@@ -1054,7 +1364,7 @@ func (f *fakeStore) DeleteInvestmentTrade(ctx context.Context, userID, tradeID i
 	}
 	return repository.ErrNotFound
 }
-func (f *fakeStore) InvestmentHoldingQuantity(ctx context.Context, userID int, assetType, symbol, broker string) (string, error) {
+func (f *fakeStore) InvestmentHoldingQuantity(ctx context.Context, userID int, assetType, symbol, exchange, broker string) (string, error) {
 	if f.investmentHoldingQuantity != nil {
 		return f.investmentHoldingQuantity(ctx, userID, assetType, symbol, broker)
 	}
@@ -1066,13 +1376,33 @@ func (*fakeStore) ListInvestmentPrices(context.Context) ([]model.InvestmentPrice
 func (*fakeStore) UpsertManualInvestmentPrice(context.Context, int, model.InvestmentPriceRequest, time.Time) (model.InvestmentPrice, error) {
 	return model.InvestmentPrice{}, repository.ErrNotFound
 }
+func (f *fakeStore) ListInvestmentMarketHistory(
+	ctx context.Context, assetType, symbol, exchange, currency string, since time.Time,
+) ([]model.InvestmentMarketHistoryPrice, error) {
+	if f.listInvestmentMarketHistory != nil {
+		return f.listInvestmentMarketHistory(ctx, assetType, symbol, exchange, currency, since)
+	}
+	return []model.InvestmentMarketHistoryPrice{}, nil
+}
+func (f *fakeStore) UpsertInvestmentMarketHistory(
+	ctx context.Context, prices []model.InvestmentMarketHistoryPrice,
+) error {
+	if f.upsertInvestmentMarketHistory != nil {
+		return f.upsertInvestmentMarketHistory(ctx, prices)
+	}
+	return nil
+}
 func (*fakeStore) CreateInvestmentSchedule(context.Context, int, model.InvestmentScheduleRequest) (model.InvestmentSchedule, error) {
 	return model.InvestmentSchedule{}, nil
 }
 func (*fakeStore) ListInvestmentSchedules(context.Context, int, string) ([]model.InvestmentSchedule, error) {
 	return []model.InvestmentSchedule{}, nil
 }
-func (*fakeStore) GetInvestmentSchedule(context.Context, int, int) (model.InvestmentSchedule, error) {
+
+func (f *fakeStore) GetInvestmentSchedule(ctx context.Context, userID, scheduleID int) (model.InvestmentSchedule, error) {
+	if f.getInvestmentSchedule != nil {
+		return f.getInvestmentSchedule(ctx, userID, scheduleID)
+	}
 	return model.InvestmentSchedule{}, repository.ErrNotFound
 }
 func (*fakeStore) UpdateInvestmentSchedule(context.Context, int, int, model.InvestmentScheduleRequest) (model.InvestmentSchedule, error) {

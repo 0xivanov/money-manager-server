@@ -151,8 +151,9 @@ func (s *Service) validateInvestmentSchedule(
 	if err != nil {
 		return model.InvestmentScheduleRequest{}, err
 	}
-	if assetType != "crypto" {
-		return model.InvestmentScheduleRequest{}, apperrors.Validation("stock investments are temporarily unavailable")
+	exchange, marketCurrency, err := normalizeInvestmentMarket(assetType, request.Exchange, request.MarketCurrency)
+	if err != nil {
+		return model.InvestmentScheduleRequest{}, err
 	}
 	amount, err := normalizeAmount(request.Amount)
 	if err != nil {
@@ -202,7 +203,8 @@ func (s *Service) validateInvestmentSchedule(
 		return model.InvestmentScheduleRequest{}, err
 	}
 	return model.InvestmentScheduleRequest{
-		AssetType: assetType, Symbol: symbol, AssetName: assetName, Broker: broker,
+		AssetType: assetType, Symbol: symbol, AssetName: assetName, Exchange: exchange,
+		MarketCurrency: marketCurrency, Broker: broker,
 		Amount: amount, Currency: currency, Frequency: recurrence.frequency, FrequencyInterval: recurrence.interval,
 		StartDate: start.Format("2006-01-02"), EndDate: endDate, DayOfWeek: recurrence.dayOfWeek,
 		DayOfMonth: recurrence.dayOfMonth, Timezone: timezone,

@@ -26,7 +26,7 @@ const budgetSelect = `WITH selected AS (
 			SELECT sum(t.amount)
 			FROM transactions t
 			WHERE t.user_id=selected.user_id AND t.type='expense' AND t.status='booked'
-				AND NOT t.excluded_from_budget
+				AND NOT t.excluded_from_budget AND t.purpose='spending'
 				AND t.occurred_at >= selected.period_start
 				AND t.occurred_at < CASE selected.period
 					WHEN 'weekly' THEN selected.period_start + 7
@@ -133,7 +133,8 @@ func (r *Repository) QueueBudgetAlerts(ctx context.Context, reference time.Time)
 		SELECT active.*,
 			COALESCE((SELECT sum(t.amount) FROM transactions t
 				WHERE t.user_id=active.user_id AND t.type='expense' AND t.status='booked'
-					AND NOT t.excluded_from_budget AND t.occurred_at >= active.period_start
+					AND NOT t.excluded_from_budget AND t.purpose='spending'
+					AND t.occurred_at >= active.period_start
 					AND t.occurred_at < CASE active.period WHEN 'weekly' THEN active.period_start+7
 						ELSE (active.period_start+INTERVAL '1 month')::date END
 					AND (active.category='' OR lower(t.category)=lower(active.category))),0) AS spent
@@ -183,7 +184,8 @@ func (r *Repository) QueueBudgetAlerts(ctx context.Context, reference time.Time)
 		}
 		_, err := tx.Exec(ctx, `INSERT INTO notification_outbox(user_id,event_type,event_key,title,body,payload)
 			SELECT $1,'budget_alert',$2,$3,$4,jsonb_build_object(
-				'budget_id',$5,'period_start',$6,'alert_level',$7,'spent_amount',$8)
+				'budget_id',$5::bigint,'period_start',$6::text,
+				'alert_level',$7::integer,'spent_amount',$8::numeric)
 			WHERE COALESCE((SELECT budget_alerts FROM notification_preferences WHERE user_id=$1),true)
 			ON CONFLICT(event_key) DO NOTHING`, item.userID,
 			"budget:"+strconv.Itoa(item.budgetID)+":"+item.periodStart+":"+strconv.Itoa(item.level), title,

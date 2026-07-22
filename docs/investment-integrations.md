@@ -1,6 +1,6 @@
 # Investment integration assessment
 
-Reviewed on 2026-07-14. No broker or exchange account API is integrated yet. Public Kraken market data is used for BTC and ETH reference pricing.
+Reviewed on 2026-07-19. Public Kraken market data is used for BTC and ETH, Trading 212 read-only account data supplies stock holdings and current values, and Marketstack supplies daily stock and ETF history when configured.
 
 ## Current product behavior
 
@@ -8,7 +8,26 @@ Money Manager records the EUR value and exact time of a BTC or ETH buy or sell. 
 
 The Kraken quote is a market reference and can differ from the user's actual Revolut X or other broker fill because of spread, fees, and execution timing. The audit export retains the entered EUR amount, derived quantity, reference unit price, provider, provider timestamp, fees, and execution timestamp.
 
-New stock trades and investment plans are temporarily disabled. Existing stock data and generic ledger code remain in place for a future market-data provider, but stock positions are excluded from the supported crypto valuation instead of invalidating it.
+Stock and ETF trades use the account's own Trading 212 fills and open positions when `TRADING212_API_KEY` and `TRADING212_API_SECRET` are configured. Listings retain their native market currency, while Trading 212 wallet-impact values provide the EUR account-currency values used by the portfolio. Marketstack end-of-day prices supply historical valuation when `MARKETSTACK_API_KEY` is configured. USD closes are converted to EUR using Frankfurter's ECB-backed daily rates. If Trading 212 is not configured or a position cannot be matched, the stock ledger remains visible with a missing-price status and does not invalidate crypto valuation.
+
+Trading 212 credentials are account-specific rather than application-wide. `TRADING212_OWNER_USER_ID` is therefore required with the key pair, and the service checks the authenticated user ID before every Trading 212 quote or fill lookup. Other users can use shared public Marketstack history, but cannot invoke the configured Trading 212 account.
+
+## Trading 212 read-only account data
+
+The API key and secret are sent only from the backend using HTTP Basic authentication and are never exposed to mobile clients. Request errors are scrubbed so neither credential can reach logs or client responses. The integration makes GET requests only to `/equity/positions`, `/equity/metadata/instruments`, and `/equity/history/orders`. It has no order-placement code. Create the Trading 212 key with portfolio, account data, and history read permissions only, then restrict it to the backend nodes' public egress IP addresses.
+
+Open positions are cached for five minutes and instrument metadata for 24 hours. Historical trade creation uses the closest account fill within seven days. Trading 212 does not provide general daily price history, so Marketstack supplies chart history for supported NASDAQ and Xetra listings. Completed stock closes are persisted in PostgreSQL and refreshed in small overlapping windows instead of being fetched for every chart request. The portfolio history response includes both aggregate totals and a per-holding value breakdown for the mobile chart.
+
+## Marketstack stock history
+
+The backend calls only Marketstack's GET `/v2/eod` endpoint. The API key is sent from the backend and is scrubbed from provider errors. Current stock quantities, fills, and live account values continue to come from Trading 212. Marketstack is used only for historical closes.
+
+The current listing map uses the native portfolio identity:
+
+- `MSTR` on NASDAQ maps to `MSTR` and is converted from USD to EUR.
+- `QDVE`, `VGWE`, and `4GLD` on Xetra map to their `.DE` Marketstack symbols and remain in EUR.
+
+The backend persists converted daily prices in `investment_market_history`. A chart request reads the shared database cache first. It backfills a missing range or refreshes a stale tail with a seven-day overlap, then stores the new closes. If Marketstack is temporarily unavailable and cached history exists, the cached series remains usable.
 
 `PUT /investments/prices` is deprecated and retained only for legacy stock records so future stock-provider work does not require a schema rollback. Crypto requests are rejected because BTC and ETH valuation always uses automatic Kraken prices and the manual price table is not consulted for crypto.
 

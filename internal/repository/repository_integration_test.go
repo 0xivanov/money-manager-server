@@ -38,7 +38,7 @@ func TestRepositoryIntegration(t *testing.T) {
 		t.Fatalf("find user = %#v, %v", record, err)
 	}
 	categories, err := repo.ListCategories(ctx, user.ID, "expense")
-	if err != nil || len(categories) != 13 {
+	if err != nil || len(categories) != 14 {
 		t.Fatalf("expense categories = %d, %v", len(categories), err)
 	}
 	category, err := repo.FindActiveCategoryName(ctx, user.ID, "expense", "GROCERIES")
@@ -148,7 +148,7 @@ func TestRepositoryIntegration(t *testing.T) {
 	if err := repo.DeleteInvestmentTrade(ctx, user.ID, trade.ID); !errors.Is(err, ErrConflict) {
 		t.Fatalf("delete depended-on investment buy error = %v", err)
 	}
-	if holding, err := repo.InvestmentHoldingQuantity(ctx, user.ID, "crypto", "BTC", "manual"); err != nil || holding != "0.001000000000000000" {
+	if holding, err := repo.InvestmentHoldingQuantity(ctx, user.ID, "crypto", "BTC", "", "manual"); err != nil || holding != "0.001000000000000000" {
 		t.Fatalf("holding after rejected buy deletion = %q, %v", holding, err)
 	}
 	if err := repo.DeleteInvestmentTrade(ctx, user.ID, sale.ID); err != nil {
@@ -309,6 +309,40 @@ func TestRepositoryIntegration(t *testing.T) {
 	if bankTransactions != 2 || bankNotifications != 1 {
 		t.Fatalf("persisted bank sync transactions=%d notifications=%d", bankTransactions, bankNotifications)
 	}
+	var suppressedTransactionID int
+	if err := pool.QueryRow(ctx, `SELECT id FROM transactions
+		WHERE user_id=$1 AND source_account_id=$2 AND external_id='bank-transaction-2'`,
+		user.ID, accountID,
+	).Scan(&suppressedTransactionID); err != nil {
+		t.Fatalf("find bank transaction for deletion: %v", err)
+	}
+	if err := repo.DeleteTransaction(ctx, user.ID, suppressedTransactionID); err != nil {
+		t.Fatalf("delete bank transaction: %v", err)
+	}
+	suppressedSync, err := repo.ImportOpenBankingTransactions(ctx, user.ID, accountID, []OpenBankingTransactionSeed{{
+		ExternalID: "bank-transaction-2", Type: "expense", Category: "transport",
+		Description: "Metro", Amount: "2.00", Currency: "EUR",
+		OccurredAt: monthStart.AddDate(0, 0, 11), Status: "booked", Metadata: []byte(`{"mcc":"4111"}`),
+	}}, claimTime)
+	if err != nil || suppressedSync.Imported != 0 || suppressedSync.Updated != 0 || suppressedSync.Unchanged != 0 {
+		t.Fatalf("sync after manual bank transaction deletion = %#v, %v", suppressedSync, err)
+	}
+	var reimportedTransactions, suppressions int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM transactions
+		WHERE user_id=$1 AND source_account_id=$2 AND external_id='bank-transaction-2'`,
+		user.ID, accountID,
+	).Scan(&reimportedTransactions); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM open_banking_transaction_suppressions
+		WHERE user_id=$1 AND source_account_id=$2 AND external_id='bank-transaction-2'`,
+		user.ID, accountID,
+	).Scan(&suppressions); err != nil {
+		t.Fatal(err)
+	}
+	if reimportedTransactions != 0 || suppressions != 1 {
+		t.Fatalf("deleted bank transaction reimported=%d suppressions=%d", reimportedTransactions, suppressions)
+	}
 	scheduleReminders, err := repo.QueueDueTransactionScheduleReminders(ctx, claimTime, 10)
 	if err != nil || scheduleReminders != 0 {
 		t.Fatalf("queue due transaction schedule reminders = %d, %v", scheduleReminders, err)
@@ -358,6 +392,45 @@ func TestRepositoryIntegration(t *testing.T) {
 	)
 	if err != nil || len(claimedAfterInterval) != 1 || claimedAfterInterval[0].AccountID != accountID {
 		t.Fatalf("open banking claim after interval = %#v, %v", claimedAfterInterval, err)
+	}
+	budget, err := repo.CreateBudget(ctx, user.ID, model.BudgetRequest{
+		Name: "Shopping cap", Category: "shopping", Amount: "9.00", Currency: "EUR",
+		Period: "monthly", WarningThreshold: 80,
+	}, monthStart)
+	if err != nil {
+		t.Fatalf("create budget for alert: %v", err)
+	}
+	budgetAlerts, err := repo.QueueBudgetAlerts(ctx, monthStart.AddDate(0, 0, 12))
+	if err != nil || budgetAlerts != 2 {
+		t.Fatalf("queue budget alerts = %d, %v", budgetAlerts, err)
+	}
+	var budgetPayloads int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM notification_outbox
+		WHERE user_id=$1 AND event_type='budget_alert'
+			AND payload @> jsonb_build_object('budget_id',$2::bigint)`,
+		user.ID, budget.ID,
+	).Scan(&budgetPayloads); err != nil || budgetPayloads != 2 {
+		t.Fatalf("budget alert payloads = %d, %v", budgetPayloads, err)
+	}
+	investmentSchedule, err := repo.CreateInvestmentSchedule(ctx, user.ID, model.InvestmentScheduleRequest{
+		AssetType: "crypto", Symbol: "BTC", AssetName: "Bitcoin", Broker: "manual",
+		Amount: "25.00", Currency: "EUR", Frequency: "daily", FrequencyInterval: 1,
+		StartDate: monthStart.Format("2006-01-02"), Timezone: "Europe/Sofia",
+	})
+	if err != nil {
+		t.Fatalf("create investment schedule for reminder: %v", err)
+	}
+	queuedReminder, err := repo.QueueInvestmentReminder(ctx, investmentSchedule, monthStart)
+	if err != nil || !queuedReminder {
+		t.Fatalf("queue investment reminder = %t, %v", queuedReminder, err)
+	}
+	var reminderPayloads int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM notification_outbox
+		WHERE user_id=$1 AND event_type='investment_reminder'
+			AND payload @> jsonb_build_object('investment_schedule_id',$2::bigint)`,
+		user.ID, investmentSchedule.ID,
+	).Scan(&reminderPayloads); err != nil || reminderPayloads != 1 {
+		t.Fatalf("investment reminder payloads = %d, %v", reminderPayloads, err)
 	}
 }
 
@@ -723,7 +796,7 @@ func TestLegacySchemaUpgradeQuarantinesInvalidRows(t *testing.T) {
 	if err := pool.QueryRow(ctx, "SELECT count(*) FROM schema_migrations").Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if users != 1 || categories != 5 || transactions != 1 || quarantined != 8 || versions != 13 {
+	if users != 1 || categories != 6 || transactions != 1 || quarantined != 8 || versions != 17 {
 		t.Fatalf("legacy upgrade counts users=%d categories=%d transactions=%d quarantined=%d versions=%d", users, categories, transactions, quarantined, versions)
 	}
 	var email, transactionType, category, currency string

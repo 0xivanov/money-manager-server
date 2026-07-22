@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"money-manager-server/internal/apperrors"
+	"money-manager-server/internal/marketdata"
 	"money-manager-server/internal/model"
 	"money-manager-server/internal/repository"
 )
@@ -85,7 +86,7 @@ func (s *Service) investmentPortfolioHistory(
 	if len(trades) > maximumInvestmentTradeRows {
 		return model.InvestmentPortfolioHistory{}, apperrors.Validation("portfolio contains more than 10000 trades")
 	}
-	supported, unsupportedPositions, err := supportedInvestmentTrades(trades)
+	supported, unsupportedPositions, err := supportedInvestmentTrades(trades, s.stockHistoryData != nil)
 	if err != nil {
 		return model.InvestmentPortfolioHistory{}, apperrors.Internal(err)
 	}
@@ -93,12 +94,6 @@ func (s *Service) investmentPortfolioHistory(
 	if len(supported) == 0 {
 		return result, nil
 	}
-	if s.marketData == nil {
-		return model.InvestmentPortfolioHistory{}, apperrors.Unavailable(
-			"crypto market pricing is temporarily unavailable", errors.New("market data client is not configured"),
-		)
-	}
-
 	ordered, err := timedInvestmentTrades(supported)
 	if err != nil {
 		return model.InvestmentPortfolioHistory{}, apperrors.Internal(err)
@@ -111,41 +106,66 @@ func (s *Service) investmentPortfolioHistory(
 	if firstDay := utcDay(ordered[0].at); firstDay.After(start) {
 		start = firstDay
 	}
-	symbols := investmentSymbols(supported)
-	history := make(map[string][]investmentMarketHistoryPoint, len(symbols))
-	for _, symbol := range symbols {
-		points, historyErr := s.marketData.DailyHistory(ctx, symbol, supportedCurrency, start.AddDate(0, 0, -1))
+	instruments := uniqueInvestmentInstruments(supported)
+	history := make(map[string][]investmentMarketHistoryPoint, len(instruments))
+	availableInstruments := make([]model.InvestmentTrade, 0, len(instruments))
+	unavailableStockInstruments := make(map[string]bool)
+	for _, instrument := range instruments {
+		points, historyErr := s.investmentDailyHistory(ctx, instrument, start.AddDate(0, 0, -1))
 		if historyErr != nil {
-			return model.InvestmentPortfolioHistory{}, apperrors.Unavailable("crypto price history is temporarily unavailable", historyErr)
+			if instrument.AssetType == "stock" {
+				key := investmentMarketKey(instrument)
+				unavailableStockInstruments[key] = true
+				openPositions, countErr := openInvestmentPositionCount(supported, instrument)
+				if countErr != nil {
+					return model.InvestmentPortfolioHistory{}, apperrors.Internal(countErr)
+				}
+				result.UnsupportedPositions += openPositions
+				continue
+			}
+			return model.InvestmentPortfolioHistory{}, apperrors.Unavailable("portfolio price history is temporarily unavailable", historyErr)
 		}
 		sort.Slice(points, func(i, j int) bool { return points[i].AsOf.Before(points[j].AsOf) })
-		history[symbol] = points
+		history[investmentMarketKey(instrument)] = points
+		availableInstruments = append(availableInstruments, instrument)
+	}
+	if len(unavailableStockInstruments) > 0 {
+		ordered = availableTimedInvestmentTrades(ordered, unavailableStockInstruments)
+		instruments = availableInstruments
+		if len(ordered) == 0 {
+			return result, nil
+		}
+		start = utcDay(ordered[0].at)
+		if days > 0 {
+			start = utcDay(now.AddDate(0, 0, -days))
+		}
+		if firstDay := utcDay(ordered[0].at); firstDay.After(start) {
+			start = firstDay
+		}
 	}
 
-	points, ledgers, err := calculateDailyInvestmentHistory(ordered, history, start, now)
+	points, ledgers, err := calculateDailyInvestmentHistory(ordered, instruments, history, start, now)
 	if err != nil {
-		return model.InvestmentPortfolioHistory{}, apperrors.Unavailable("crypto price history is incomplete", err)
+		return model.InvestmentPortfolioHistory{}, apperrors.Unavailable("portfolio price history is incomplete", err)
 	}
 	result.Points = points
-	openSymbols := openSymbolsFromHistoryLedgers(ledgers)
-	currentPrices := make(map[string]*big.Rat, len(openSymbols))
-	if len(openSymbols) > 0 {
-		quotes, quoteErr := s.marketData.CurrentQuotes(ctx, openSymbols, supportedCurrency)
-		if quoteErr != nil {
-			return model.InvestmentPortfolioHistory{}, apperrors.Unavailable("crypto market pricing is temporarily unavailable", quoteErr)
+	currentPrices := make(map[string]*big.Rat, len(instruments))
+	for _, instrument := range instruments {
+		if !historyLedgerIsOpen(ledgers, instrument) {
+			continue
 		}
-		for _, symbol := range openSymbols {
-			quote, exists := quotes[symbol]
-			price, valid := new(big.Rat).SetString(quote.Price)
-			if !exists || !valid || price.Sign() <= 0 {
-				return model.InvestmentPortfolioHistory{}, apperrors.Unavailable(
-					"crypto market pricing returned an incomplete quote", fmt.Errorf("missing quote for %s", symbol),
-				)
+		quote, quoteErr := s.currentInvestmentHistoryQuote(ctx, userID, instrument)
+		price, valid := new(big.Rat).SetString(quote.Price)
+		if quoteErr != nil || !valid || price.Sign() <= 0 {
+			if latest := latestInvestmentHistoryPrice(history[investmentMarketKey(instrument)]); latest != nil {
+				currentPrices[investmentMarketKey(instrument)] = latest
+				continue
 			}
-			currentPrices[symbol] = price
+			return model.InvestmentPortfolioHistory{}, apperrors.Unavailable("portfolio market pricing returned an incomplete quote", quoteErr)
 		}
+		currentPrices[investmentMarketKey(instrument)] = price
 	}
-	currentValue, currentBasis, err := valueHistoryLedgers(ledgers, currentPrices)
+	currentValue, currentBasis, currentHoldings, err := valueHistoryLedgers(ledgers, currentPrices)
 	if err != nil {
 		return model.InvestmentPortfolioHistory{}, apperrors.Internal(err)
 	}
@@ -155,9 +175,134 @@ func (s *Service) investmentPortfolioHistory(
 	result.Points = append(result.Points, model.InvestmentPortfolioHistoryPoint{
 		AsOf: now.Format(time.RFC3339), Value: formatRat(currentValue, 2),
 		InvestedAmount: formatRat(currentBasis, 2),
+		Holdings:       investmentHistoryHoldings(instruments, currentHoldings),
 	})
 	result.Points = sampleInvestmentHistoryPoints(result.Points, maximumInvestmentHistoryResponsePoints)
 	return result, nil
+}
+
+func (s *Service) investmentDailyHistory(
+	ctx context.Context,
+	instrument model.InvestmentTrade,
+	since time.Time,
+) ([]investmentMarketHistoryPoint, error) {
+	if instrument.AssetType == "crypto" {
+		if s.marketData == nil {
+			return nil, errors.New("crypto market data client is not configured")
+		}
+		return s.marketData.DailyHistory(ctx, instrument.Symbol, supportedCurrency, since)
+	}
+	if s.stockHistoryData == nil {
+		return nil, errors.New("stock history market data client is not configured")
+	}
+	return s.cachedStockDailyHistory(ctx, instrument, since)
+}
+
+func (s *Service) cachedStockDailyHistory(
+	ctx context.Context,
+	instrument model.InvestmentTrade,
+	since time.Time,
+) ([]investmentMarketHistoryPoint, error) {
+	since = utcDay(since)
+	cached, err := s.store.ListInvestmentMarketHistory(
+		ctx, "stock", instrument.Symbol, instrument.Exchange, supportedCurrency, since,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list cached stock history: %w", err)
+	}
+	needsBackfill := len(cached) == 0 || cached[0].AsOf.After(since.AddDate(0, 0, 7))
+	staleBefore := utcDay(s.now().UTC()).AddDate(0, 0, -4)
+	needsRefresh := len(cached) == 0 || cached[len(cached)-1].AsOf.Before(staleBefore)
+	if !needsBackfill && !needsRefresh {
+		return storedInvestmentHistoryPoints(cached), nil
+	}
+	fetchSince := since
+	if !needsBackfill && len(cached) > 0 {
+		fetchSince = cached[len(cached)-1].AsOf.AddDate(0, 0, -7)
+	}
+	fetched, fetchErr := s.stockHistoryData.DailyHistory(ctx, marketdata.EquityInstrument{
+		Symbol: instrument.Symbol, Exchange: instrument.Exchange, MarketCurrency: instrument.MarketCurrency,
+	}, supportedCurrency, fetchSince)
+	if fetchErr != nil {
+		if len(cached) > 0 {
+			return storedInvestmentHistoryPoints(cached), nil
+		}
+		return nil, fetchErr
+	}
+	stored := make([]model.InvestmentMarketHistoryPrice, 0, len(fetched))
+	for _, point := range fetched {
+		stored = append(stored, model.InvestmentMarketHistoryPrice{
+			AssetType: "stock", Symbol: instrument.Symbol, Exchange: instrument.Exchange,
+			Currency: supportedCurrency, Price: point.Price, Provider: marketdata.ProviderMarketstack,
+			AsOf: utcDay(point.AsOf),
+		})
+	}
+	if err := s.store.UpsertInvestmentMarketHistory(ctx, stored); err != nil {
+		return nil, fmt.Errorf("cache stock history: %w", err)
+	}
+	return mergeInvestmentHistory(cached, fetched, since), nil
+}
+
+func (s *Service) currentInvestmentHistoryQuote(
+	ctx context.Context,
+	userID int,
+	instrument model.InvestmentTrade,
+) (investmentMarketQuote, error) {
+	if instrument.AssetType == "crypto" {
+		if s.marketData == nil {
+			return investmentMarketQuote{}, errors.New("crypto market data client is not configured")
+		}
+		quotes, err := s.marketData.CurrentQuotes(ctx, []string{instrument.Symbol}, supportedCurrency)
+		return quotes[instrument.Symbol], err
+	}
+	if !s.canUseTrading212(userID) {
+		return investmentMarketQuote{}, errors.New("Trading 212 integration is not available for this account")
+	}
+	return s.stockMarketData.CurrentQuote(ctx, marketdata.EquityInstrument{
+		Symbol: instrument.Symbol, Exchange: instrument.Exchange, MarketCurrency: instrument.MarketCurrency,
+	}, supportedCurrency)
+}
+
+func storedInvestmentHistoryPoints(prices []model.InvestmentMarketHistoryPrice) []investmentMarketHistoryPoint {
+	result := make([]investmentMarketHistoryPoint, 0, len(prices))
+	for _, price := range prices {
+		result = append(result, investmentMarketHistoryPoint{Price: price.Price, AsOf: utcDay(price.AsOf)})
+	}
+	return result
+}
+
+func mergeInvestmentHistory(
+	cached []model.InvestmentMarketHistoryPrice,
+	fetched []investmentMarketHistoryPoint,
+	since time.Time,
+) []investmentMarketHistoryPoint {
+	byDay := make(map[time.Time]investmentMarketHistoryPoint, len(cached)+len(fetched))
+	for _, point := range storedInvestmentHistoryPoints(cached) {
+		byDay[utcDay(point.AsOf)] = point
+	}
+	for _, point := range fetched {
+		point.AsOf = utcDay(point.AsOf)
+		byDay[point.AsOf] = point
+	}
+	result := make([]investmentMarketHistoryPoint, 0, len(byDay))
+	for day, point := range byDay {
+		if !day.Before(since) {
+			result = append(result, point)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].AsOf.Before(result[j].AsOf) })
+	return result
+}
+
+func latestInvestmentHistoryPrice(points []investmentMarketHistoryPoint) *big.Rat {
+	if len(points) == 0 {
+		return nil
+	}
+	price, ok := new(big.Rat).SetString(points[len(points)-1].Price)
+	if !ok || price.Sign() <= 0 {
+		return nil
+	}
+	return price
 }
 
 func sampleInvestmentHistoryPoints(
@@ -216,8 +361,82 @@ func investmentSymbols(trades []model.InvestmentTrade) []string {
 	return symbols
 }
 
+func uniqueInvestmentInstruments(trades []model.InvestmentTrade) []model.InvestmentTrade {
+	items := make(map[string]model.InvestmentTrade)
+	for _, trade := range trades {
+		items[investmentMarketKey(trade)] = trade
+	}
+	keys := make([]string, 0, len(items))
+	for key := range items {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	result := make([]model.InvestmentTrade, 0, len(keys))
+	for _, key := range keys {
+		result = append(result, items[key])
+	}
+	return result
+}
+
+func investmentMarketKey(trade model.InvestmentTrade) string {
+	return trade.AssetType + "\x00" + trade.Symbol + "\x00" + trade.Exchange
+}
+
+func availableTimedInvestmentTrades(
+	trades []timedInvestmentTrade,
+	unavailable map[string]bool,
+) []timedInvestmentTrade {
+	result := make([]timedInvestmentTrade, 0, len(trades))
+	for _, trade := range trades {
+		if !unavailable[investmentMarketKey(trade.trade)] {
+			result = append(result, trade)
+		}
+	}
+	return result
+}
+
+func openInvestmentPositionCount(trades []model.InvestmentTrade, instrument model.InvestmentTrade) (int, error) {
+	quantities := make(map[string]*big.Rat)
+	key := investmentMarketKey(instrument)
+	for _, trade := range trades {
+		if investmentMarketKey(trade) != key {
+			continue
+		}
+		quantity, ok := new(big.Rat).SetString(trade.Quantity)
+		if !ok {
+			return 0, errors.New("stored investment trade contains an invalid quantity")
+		}
+		if quantities[trade.Broker] == nil {
+			quantities[trade.Broker] = new(big.Rat)
+		}
+		if trade.Side == "buy" {
+			quantities[trade.Broker].Add(quantities[trade.Broker], quantity)
+		} else {
+			quantities[trade.Broker].Sub(quantities[trade.Broker], quantity)
+		}
+	}
+	count := 0
+	for _, quantity := range quantities {
+		if quantity.Sign() > 0 {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func historyLedgerIsOpen(ledgers map[string]*historyLedgerPosition, instrument model.InvestmentTrade) bool {
+	prefix := investmentMarketKey(instrument) + "\x00"
+	for key, position := range ledgers {
+		if strings.HasPrefix(key, prefix) && position.quantity.Sign() > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func calculateDailyInvestmentHistory(
 	trades []timedInvestmentTrade,
+	instruments []model.InvestmentTrade,
 	history map[string][]investmentMarketHistoryPoint,
 	start time.Time,
 	now time.Time,
@@ -253,7 +472,7 @@ func calculateDailyInvestmentHistory(
 		if len(ledgers) == 0 {
 			continue
 		}
-		value, basis, err := valueHistoryLedgers(ledgers, latestPrices)
+		value, basis, holdingValues, err := valueHistoryLedgers(ledgers, latestPrices)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -264,6 +483,7 @@ func calculateDailyInvestmentHistory(
 		points = append(points, model.InvestmentPortfolioHistoryPoint{
 			AsOf: pointAsOf.Format(time.RFC3339), Value: formatRat(value, 2),
 			InvestedAmount: formatRat(basis, 2),
+			Holdings:       investmentHistoryHoldings(instruments, holdingValues),
 		})
 	}
 	return points, ledgers, nil
@@ -284,7 +504,7 @@ func applyHistoryTrade(ledgers map[string]*historyLedgerPosition, trade model.In
 			return errors.New("stored investment trade contains an invalid amount")
 		}
 	}
-	key := trade.AssetType + "\x00" + trade.Symbol + "\x00" + trade.Broker
+	key := investmentMarketKey(trade) + "\x00" + trade.Broker
 	position := ledgers[key]
 	if position == nil {
 		position = &historyLedgerPosition{quantity: new(big.Rat), basis: new(big.Rat)}
@@ -310,20 +530,46 @@ func applyHistoryTrade(ledgers map[string]*historyLedgerPosition, trade model.In
 func valueHistoryLedgers(
 	ledgers map[string]*historyLedgerPosition,
 	prices map[string]*big.Rat,
-) (*big.Rat, *big.Rat, error) {
+) (*big.Rat, *big.Rat, map[string]*big.Rat, error) {
 	value, basis := new(big.Rat), new(big.Rat)
+	holdings := make(map[string]*big.Rat)
 	for key, position := range ledgers {
 		basis.Add(basis, position.basis)
 		if position.quantity.Sign() == 0 {
 			continue
 		}
 		parts := strings.Split(key, "\x00")
-		if len(parts) < 2 || prices[parts[1]] == nil {
-			return nil, nil, fmt.Errorf("missing history price for %s", parts[1])
+		if len(parts) < 3 || prices[strings.Join(parts[:3], "\x00")] == nil {
+			return nil, nil, nil, fmt.Errorf("missing history price for %s", parts[1])
 		}
-		value.Add(value, new(big.Rat).Mul(position.quantity, prices[parts[1]]))
+		instrumentKey := strings.Join(parts[:3], "\x00")
+		positionValue := new(big.Rat).Mul(position.quantity, prices[instrumentKey])
+		value.Add(value, positionValue)
+		if holdings[instrumentKey] == nil {
+			holdings[instrumentKey] = new(big.Rat)
+		}
+		holdings[instrumentKey].Add(holdings[instrumentKey], positionValue)
 	}
-	return value, basis, nil
+	return value, basis, holdings, nil
+}
+
+func investmentHistoryHoldings(
+	instruments []model.InvestmentTrade,
+	values map[string]*big.Rat,
+) []model.InvestmentPortfolioHistoryHolding {
+	result := make([]model.InvestmentPortfolioHistoryHolding, 0, len(instruments))
+	for _, instrument := range instruments {
+		value := values[investmentMarketKey(instrument)]
+		if value == nil {
+			value = new(big.Rat)
+		}
+		result = append(result, model.InvestmentPortfolioHistoryHolding{
+			AssetType: instrument.AssetType, Symbol: instrument.Symbol,
+			AssetName: instrument.AssetName, Exchange: instrument.Exchange,
+			Value: formatRat(value, 2),
+		})
+	}
+	return result
 }
 
 func openSymbolsFromHistoryLedgers(ledgers map[string]*historyLedgerPosition) []string {

@@ -43,6 +43,13 @@ type Config struct {
 	EnableBankingStateTTL          time.Duration
 	EnableBankingRequestTimeout    time.Duration
 	MarketDataRequestTimeout       time.Duration
+	Trading212APIKey               string
+	Trading212APISecret            string
+	Trading212OwnerUserID          int
+	Trading212BaseURL              string
+	MarketstackAPIKey              string
+	MarketstackBaseURL             string
+	FrankfurterBaseURL             string
 	APNSKeyID                      string
 	APNSTeamID                     string
 	APNSBundleID                   string

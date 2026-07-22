@@ -12,16 +12,20 @@ type Transaction struct {
 	Status               string `json:"status"`
 	ExcludedFromBudget   bool   `json:"excluded_from_budget"`
 	ScheduleOccurrenceID *int   `json:"schedule_occurrence_id,omitempty"`
+	Purpose              string `json:"purpose"`
+	InvestmentScheduleID *int   `json:"investment_schedule_id,omitempty"`
 }
 
 type TransactionRequest struct {
-	Type               string `json:"type"`
-	Category           string `json:"category"`
-	Description        string `json:"description"`
-	Amount             string `json:"amount"`
-	Currency           string `json:"currency"`
-	OccurredAt         string `json:"occurred_at"`
-	ExcludedFromBudget bool   `json:"excluded_from_budget"`
+	Type                 string `json:"type"`
+	Category             string `json:"category"`
+	Description          string `json:"description"`
+	Amount               string `json:"amount"`
+	Currency             string `json:"currency"`
+	OccurredAt           string `json:"occurred_at"`
+	ExcludedFromBudget   bool   `json:"excluded_from_budget"`
+	Purpose              string `json:"purpose,omitempty"`
+	InvestmentScheduleID *int   `json:"investment_schedule_id,omitempty"`
 }
 
 type Category struct {
@@ -40,6 +44,7 @@ type Summary struct {
 	Month            string `json:"month"`
 	Income           string `json:"income"`
 	Expense          string `json:"expense"`
+	CashOutflow      string `json:"cash_outflow"`
 	Balance          string `json:"balance"`
 	Currency         string `json:"currency"`
 	TransactionCount int    `json:"transaction_count"`

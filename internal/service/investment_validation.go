@@ -18,8 +18,9 @@ func (s *Service) validateInvestmentTrade(request model.InvestmentTradeRequest) 
 	if err != nil {
 		return model.InvestmentTradeRequest{}, err
 	}
-	if assetType != "crypto" {
-		return model.InvestmentTradeRequest{}, apperrors.Validation("stock investments are temporarily unavailable")
+	exchange, marketCurrency, err := normalizeInvestmentMarket(assetType, request.Exchange, request.MarketCurrency)
+	if err != nil {
+		return model.InvestmentTradeRequest{}, err
 	}
 	side := strings.ToLower(strings.TrimSpace(request.Side))
 	if side != "buy" && side != "sell" {
@@ -72,10 +73,34 @@ func (s *Service) validateInvestmentTrade(request model.InvestmentTradeRequest) 
 		return model.InvestmentTradeRequest{}, err
 	}
 	return model.InvestmentTradeRequest{
-		AssetType: assetType, Symbol: symbol, AssetName: assetName, Broker: broker, Side: side,
+		AssetType: assetType, Symbol: symbol, AssetName: assetName, Exchange: exchange,
+		MarketCurrency: marketCurrency, Broker: broker, Side: side,
 		Amount: amount, Fees: fees, Currency: currency,
 		OccurredAt: occurredAt.UTC().Truncate(time.Second).Format(time.RFC3339), Notes: notes,
 	}, nil
+}
+
+func normalizeInvestmentMarket(assetType, exchangeValue, currencyValue string) (string, string, error) {
+	exchange := strings.ToUpper(strings.TrimSpace(exchangeValue))
+	marketCurrency := strings.ToUpper(strings.TrimSpace(currencyValue))
+	if assetType == "crypto" {
+		return "", supportedCurrency, nil
+	}
+	if exchange == "" || len(exchange) > 20 || !investmentSymbolPattern.MatchString(exchange) {
+		return "", "", apperrors.Validation("exchange must contain 1 to 20 uppercase letters, numbers, dots, or hyphens")
+	}
+	if marketCurrency == "" {
+		marketCurrency = supportedCurrency
+	}
+	if len(marketCurrency) != 3 {
+		return "", "", apperrors.Validation("market_currency must use a three-letter ISO currency code")
+	}
+	for _, character := range marketCurrency {
+		if character < 'A' || character > 'Z' {
+			return "", "", apperrors.Validation("market_currency must use a three-letter ISO currency code")
+		}
+	}
+	return exchange, marketCurrency, nil
 }
 
 func parseInvestmentOccurredAt(value string) (time.Time, error) {

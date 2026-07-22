@@ -10,13 +10,14 @@ import (
 	"time"
 
 	"money-manager-server/internal/apperrors"
+	"money-manager-server/internal/marketdata"
 	"money-manager-server/internal/model"
 	"money-manager-server/internal/repository"
 )
 
 type investmentLedgerPosition struct {
-	assetType, symbol, assetName, broker string
-	quantity, basis, realized            *big.Rat
+	assetType, symbol, assetName, exchange, marketCurrency, broker string
+	quantity, basis, realized                                      *big.Rat
 }
 
 func (s *Service) InvestmentPortfolio(ctx context.Context, userID int) (model.InvestmentPortfolio, error) {
@@ -40,38 +41,57 @@ func (s *Service) investmentPortfolio(ctx context.Context, userID int) (model.In
 	if len(trades) > maximumInvestmentTradeRows {
 		return model.InvestmentPortfolio{}, apperrors.Validation("portfolio contains more than 10000 trades")
 	}
-	supportedTrades, unsupportedPositions, err := supportedInvestmentTrades(trades)
+	supportedTrades, unsupportedPositions, err := supportedInvestmentTrades(trades, true)
 	if err != nil {
 		return model.InvestmentPortfolio{}, apperrors.Internal(err)
 	}
-	symbols, err := openInvestmentSymbols(supportedTrades)
+	instruments, err := openInvestmentInstruments(supportedTrades)
 	if err != nil {
 		return model.InvestmentPortfolio{}, apperrors.Internal(err)
 	}
-	prices := make([]model.InvestmentPrice, 0, len(symbols))
-	if len(symbols) > 0 {
-		if s.marketData == nil {
-			return model.InvestmentPortfolio{}, apperrors.Unavailable(
-				"crypto market pricing is temporarily unavailable", errors.New("market data client is not configured"),
-			)
+	prices := make([]model.InvestmentPrice, 0, len(instruments))
+	cryptoSymbols := make([]string, 0, len(instruments))
+	for _, instrument := range instruments {
+		if instrument.AssetType == "crypto" {
+			cryptoSymbols = append(cryptoSymbols, instrument.Symbol)
 		}
-		quotes, quoteErr := s.marketData.CurrentQuotes(ctx, symbols, supportedCurrency)
-		if quoteErr != nil {
-			return model.InvestmentPortfolio{}, apperrors.Unavailable("crypto market pricing is temporarily unavailable", quoteErr)
-		}
-		for _, symbol := range symbols {
-			quote, ok := quotes[symbol]
-			if !ok || quote.AsOf.IsZero() || strings.TrimSpace(quote.Price) == "" {
-				return model.InvestmentPortfolio{}, apperrors.Unavailable(
-					"crypto market pricing returned an incomplete quote", fmt.Errorf("missing quote for %s", symbol),
-				)
+	}
+	if len(cryptoSymbols) > 0 {
+		if s.marketData != nil {
+			quotes, quoteErr := s.marketData.CurrentQuotes(ctx, cryptoSymbols, supportedCurrency)
+			if quoteErr == nil {
+				for _, symbol := range cryptoSymbols {
+					quote, ok := quotes[symbol]
+					if !ok || quote.AsOf.IsZero() || strings.TrimSpace(quote.Price) == "" {
+						continue
+					}
+					prices = append(prices, model.InvestmentPrice{
+						AssetType: "crypto", Symbol: symbol, Currency: supportedCurrency,
+						Price: quote.Price, Provider: quote.Provider,
+						AsOf: quote.AsOf.UTC().Truncate(time.Second).Format(time.RFC3339),
+					})
+				}
 			}
-			prices = append(prices, model.InvestmentPrice{
-				AssetType: "crypto", Symbol: symbol, Currency: supportedCurrency,
-				Price: quote.Price, Provider: quote.Provider,
-				AsOf: quote.AsOf.UTC().Truncate(time.Second).Format(time.RFC3339),
-			})
 		}
+	}
+	for _, instrument := range instruments {
+		if instrument.AssetType != "stock" {
+			continue
+		}
+		if !s.canUseTrading212(userID) {
+			continue
+		}
+		quote, quoteErr := s.stockMarketData.CurrentQuote(ctx, marketdata.EquityInstrument{
+			Symbol: instrument.Symbol, Exchange: instrument.Exchange, MarketCurrency: instrument.MarketCurrency,
+		}, supportedCurrency)
+		if quoteErr != nil {
+			continue
+		}
+		prices = append(prices, model.InvestmentPrice{
+			AssetType: "stock", Symbol: instrument.Symbol, Exchange: instrument.Exchange,
+			Currency: supportedCurrency, Price: quote.Price, Provider: quote.Provider,
+			AsOf: quote.AsOf.UTC().Truncate(time.Second).Format(time.RFC3339),
+		})
 	}
 	portfolio, err := calculateInvestmentPortfolio(supportedTrades, prices)
 	if err != nil {
@@ -81,11 +101,12 @@ func (s *Service) investmentPortfolio(ctx context.Context, userID int) (model.In
 	return portfolio, nil
 }
 
-func supportedInvestmentTrades(trades []model.InvestmentTrade) ([]model.InvestmentTrade, int, error) {
+func supportedInvestmentTrades(trades []model.InvestmentTrade, stocksEnabled bool) ([]model.InvestmentTrade, int, error) {
 	supported := make([]model.InvestmentTrade, 0, len(trades))
 	unsupportedHoldings := make(map[string]*big.Rat)
 	for _, trade := range trades {
-		if trade.AssetType == "crypto" && (trade.Symbol == "BTC" || trade.Symbol == "ETH") {
+		if (trade.AssetType == "crypto" && (trade.Symbol == "BTC" || trade.Symbol == "ETH")) ||
+			(trade.AssetType == "stock" && stocksEnabled && trade.Exchange != "" && trade.Exchange != "UNKNOWN") {
 			supported = append(supported, trade)
 			continue
 		}
@@ -138,6 +159,39 @@ func openInvestmentSymbols(trades []model.InvestmentTrade) ([]string, error) {
 	return symbols, nil
 }
 
+func openInvestmentInstruments(trades []model.InvestmentTrade) ([]model.InvestmentTrade, error) {
+	holdings := make(map[string]*big.Rat)
+	representatives := make(map[string]model.InvestmentTrade)
+	for _, trade := range trades {
+		quantity, ok := new(big.Rat).SetString(trade.Quantity)
+		if !ok {
+			return nil, errors.New("stored investment trade contains an invalid quantity")
+		}
+		key := trade.AssetType + "\x00" + trade.Symbol + "\x00" + trade.Exchange
+		if holdings[key] == nil {
+			holdings[key] = new(big.Rat)
+			representatives[key] = trade
+		}
+		if trade.Side == "buy" {
+			holdings[key].Add(holdings[key], quantity)
+		} else {
+			holdings[key].Sub(holdings[key], quantity)
+		}
+	}
+	keys := make([]string, 0, len(holdings))
+	for key, quantity := range holdings {
+		if quantity.Sign() > 0 {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	result := make([]model.InvestmentTrade, 0, len(keys))
+	for _, key := range keys {
+		result = append(result, representatives[key])
+	}
+	return result, nil
+}
+
 func calculateInvestmentPortfolio(trades []model.InvestmentTrade, prices []model.InvestmentPrice) (model.InvestmentPortfolio, error) {
 	ordered := append([]model.InvestmentTrade(nil), trades...)
 	sort.SliceStable(ordered, func(i, j int) bool {
@@ -149,11 +203,12 @@ func calculateInvestmentPortfolio(trades []model.InvestmentTrade, prices []model
 	ledgers := make(map[string]*investmentLedgerPosition)
 	keys := make([]string, 0)
 	for _, trade := range ordered {
-		key := trade.AssetType + "\x00" + trade.Symbol + "\x00" + trade.Broker
+		key := trade.AssetType + "\x00" + trade.Symbol + "\x00" + trade.Exchange + "\x00" + trade.Broker
 		position := ledgers[key]
 		if position == nil {
 			position = &investmentLedgerPosition{
-				assetType: trade.AssetType, symbol: trade.Symbol, assetName: trade.AssetName, broker: trade.Broker,
+				assetType: trade.AssetType, symbol: trade.Symbol, assetName: trade.AssetName,
+				exchange: trade.Exchange, marketCurrency: trade.MarketCurrency, broker: trade.Broker,
 				quantity: new(big.Rat), basis: new(big.Rat), realized: new(big.Rat),
 			}
 			ledgers[key] = position
@@ -192,7 +247,7 @@ func calculateInvestmentPortfolio(trades []model.InvestmentTrade, prices []model
 	}
 	priceMap := make(map[string]model.InvestmentPrice, len(prices))
 	for _, price := range prices {
-		priceMap[price.AssetType+"\x00"+price.Symbol] = price
+		priceMap[price.AssetType+"\x00"+price.Symbol+"\x00"+price.Exchange] = price
 	}
 	sort.Strings(keys)
 	portfolio := model.InvestmentPortfolio{
@@ -208,6 +263,7 @@ func calculateInvestmentPortfolio(trades []model.InvestmentTrade, prices []model
 		}
 		position := model.InvestmentPosition{
 			AssetType: ledger.assetType, Symbol: ledger.symbol, AssetName: ledger.assetName,
+			Exchange: ledger.exchange, MarketCurrency: ledger.marketCurrency,
 			Broker: ledger.broker, Quantity: formatRatTrimmed(ledger.quantity, 18),
 			AverageCost: formatRat(average, 8), InvestedAmount: formatRat(ledger.basis, 2),
 			RealizedProfit: formatRat(ledger.realized, 2), Currency: supportedCurrency, PriceStatus: "missing",
@@ -216,7 +272,7 @@ func calculateInvestmentPortfolio(trades []model.InvestmentTrade, prices []model
 		totalRealized.Add(totalRealized, ledger.realized)
 		if ledger.quantity.Sign() == 0 {
 			position.PriceStatus = "not_required"
-		} else if price, ok := priceMap[ledger.assetType+"\x00"+ledger.symbol]; ok {
+		} else if price, ok := priceMap[ledger.assetType+"\x00"+ledger.symbol+"\x00"+ledger.exchange]; ok {
 			currentPrice, valid := new(big.Rat).SetString(price.Price)
 			if !valid {
 				return model.InvestmentPortfolio{}, apperrors.Internal(errors.New("stored investment price contains an invalid decimal"))

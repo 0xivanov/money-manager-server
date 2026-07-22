@@ -20,7 +20,7 @@ type TransactionFilter struct {
 
 func (r *Repository) ListTransactions(ctx context.Context, userID int, filter TransactionFilter) ([]model.Transaction, error) {
 	query := `SELECT id,type,category,description,amount::text,currency,to_char(occurred_at,'YYYY-MM-DD'),
-        source,status,excluded_from_budget,schedule_occurrence_id
+        source,status,excluded_from_budget,schedule_occurrence_id,purpose,investment_schedule_id
         FROM transactions WHERE user_id=$1 AND occurred_at >= $2 AND occurred_at < $3`
 	args := []any{userID, filter.From, filter.To}
 	if filter.Type != "" {
@@ -52,7 +52,7 @@ func (r *Repository) ListTransactions(ctx context.Context, userID int, filter Tr
 
 func (r *Repository) ExportTransactions(ctx context.Context, userID int, from, toExclusive time.Time, limit int) ([]model.Transaction, error) {
 	rows, err := r.db.Query(ctx, `SELECT id,type,category,description,amount::text,currency,to_char(occurred_at,'YYYY-MM-DD'),
-        source,status,excluded_from_budget,schedule_occurrence_id
+        source,status,excluded_from_budget,schedule_occurrence_id,purpose,investment_schedule_id
         FROM transactions WHERE user_id=$1 AND occurred_at >= $2 AND occurred_at < $3
 		ORDER BY occurred_at ASC,id ASC LIMIT $4`, userID, from, toExclusive, limit)
 	if err != nil {
@@ -72,13 +72,16 @@ func (r *Repository) ExportTransactions(ctx context.Context, userID int, from, t
 }
 
 func (r *Repository) CreateTransaction(ctx context.Context, userID int, request model.TransactionRequest) (model.Transaction, error) {
+	if request.Purpose == "" {
+		request.Purpose = "spending"
+	}
 	row := r.db.QueryRow(ctx, `INSERT INTO transactions(
-        user_id,type,category,description,amount,currency,occurred_at,source,status,excluded_from_budget
-    ) VALUES($1,$2,$3,$4,$5,$6,$7,'manual','booked',$8)
+        user_id,type,category,description,amount,currency,occurred_at,source,status,excluded_from_budget,purpose,investment_schedule_id
+    ) VALUES($1,$2,$3,$4,$5,$6,$7,'manual','booked',$8,$9,$10)
         RETURNING id,type,category,description,amount::text,currency,to_char(occurred_at,'YYYY-MM-DD'),
-            source,status,excluded_from_budget,schedule_occurrence_id`,
+            source,status,excluded_from_budget,schedule_occurrence_id,purpose,investment_schedule_id`,
 		userID, request.Type, request.Category, request.Description, request.Amount, request.Currency,
-		request.OccurredAt, request.ExcludedFromBudget)
+		request.OccurredAt, request.ExcludedFromBudget, request.Purpose, request.InvestmentScheduleID)
 	return scanTransaction(row)
 }
 
@@ -125,41 +128,59 @@ func (r *Repository) ImportTransactions(ctx context.Context, userID int, transac
 
 func (r *Repository) GetTransaction(ctx context.Context, userID, transactionID int) (model.Transaction, error) {
 	row := r.db.QueryRow(ctx, `SELECT id,type,category,description,amount::text,currency,to_char(occurred_at,'YYYY-MM-DD'),
-        source,status,excluded_from_budget,schedule_occurrence_id
+        source,status,excluded_from_budget,schedule_occurrence_id,purpose,investment_schedule_id
         FROM transactions WHERE id=$1 AND user_id=$2`, transactionID, userID)
 	transaction, err := scanTransaction(row)
 	return transaction, mapNotFound(err)
 }
 
 func (r *Repository) UpdateTransaction(ctx context.Context, userID, transactionID int, request model.TransactionRequest) (model.Transaction, error) {
+	if request.Purpose == "" {
+		request.Purpose = "spending"
+	}
 	row := r.db.QueryRow(ctx, `UPDATE transactions
 		SET source_metadata=CASE
-				WHEN source='open_banking' AND (type IS DISTINCT FROM $1 OR category IS DISTINCT FROM $2)
+				WHEN source='open_banking' AND (type IS DISTINCT FROM $1 OR category IS DISTINCT FROM $2 OR purpose IS DISTINCT FROM $8)
 				THEN source_metadata || jsonb_strip_nulls(jsonb_build_object(
 					'classification_override',true,
 					'type_override',CASE WHEN type IS DISTINCT FROM $1 THEN true END,
 					'category_override',CASE WHEN category IS DISTINCT FROM $2 THEN true END,
+					'purpose_override',CASE WHEN purpose IS DISTINCT FROM $8 THEN true END,
 					'category_source','user_override'
 				))
 				ELSE source_metadata
 			END,
 			type=$1,category=$2,description=$3,amount=$4,currency=$5,occurred_at=$6,
-			excluded_from_budget=$7,updated_at=now()
-        WHERE id=$8 AND user_id=$9
+			excluded_from_budget=$7,purpose=$8,investment_schedule_id=$9,updated_at=now()
+        WHERE id=$10 AND user_id=$11
         RETURNING id,type,category,description,amount::text,currency,to_char(occurred_at,'YYYY-MM-DD'),
-            source,status,excluded_from_budget,schedule_occurrence_id`,
+            source,status,excluded_from_budget,schedule_occurrence_id,purpose,investment_schedule_id`,
 		request.Type, request.Category, request.Description, request.Amount, request.Currency,
-		request.OccurredAt, request.ExcludedFromBudget, transactionID, userID)
+		request.OccurredAt, request.ExcludedFromBudget, request.Purpose, request.InvestmentScheduleID,
+		transactionID, userID)
 	transaction, err := scanTransaction(row)
 	return transaction, mapNotFound(err)
 }
 
 func (r *Repository) DeleteTransaction(ctx context.Context, userID, transactionID int) error {
-	tag, err := r.db.Exec(ctx, "DELETE FROM transactions WHERE id=$1 AND user_id=$2", transactionID, userID)
+	var deleted bool
+	err := r.db.QueryRow(ctx, `WITH deleted AS (
+		DELETE FROM transactions
+		WHERE id=$1 AND user_id=$2
+		RETURNING user_id,source,source_account_id,external_id
+	), suppressed AS (
+		INSERT INTO open_banking_transaction_suppressions(user_id,source_account_id,external_id)
+		SELECT user_id,source_account_id,external_id
+		FROM deleted
+		WHERE source='open_banking' AND source_account_id IS NOT NULL AND external_id IS NOT NULL
+		ON CONFLICT(user_id,source_account_id,external_id)
+		DO UPDATE SET deleted_at=now()
+	)
+	SELECT EXISTS(SELECT 1 FROM deleted)`, transactionID, userID).Scan(&deleted)
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
+	if !deleted {
 		return ErrNotFound
 	}
 	return nil
@@ -167,14 +188,15 @@ func (r *Repository) DeleteTransaction(ctx context.Context, userID, transactionI
 
 func (r *Repository) Summary(ctx context.Context, userID int, month string, from, to time.Time) (model.Summary, error) {
 	summary := model.Summary{Month: month, Currency: "EUR"}
-	var rawIncome, rawExpense string
+	var rawIncome, rawExpense, rawCashOutflow string
 	err := r.db.QueryRow(ctx, `SELECT
 		COALESCE(SUM(amount) FILTER (WHERE type='income'),0)::text,
+		COALESCE(SUM(amount) FILTER (WHERE type='expense' AND purpose='spending'),0)::text,
 		COALESCE(SUM(amount) FILTER (WHERE type='expense'),0)::text,
 		COUNT(*)
         FROM transactions WHERE user_id=$1 AND occurred_at >= $2 AND occurred_at < $3 AND status='booked'`,
 		userID, from, to,
-	).Scan(&rawIncome, &rawExpense, &summary.TransactionCount)
+	).Scan(&rawIncome, &rawExpense, &rawCashOutflow, &summary.TransactionCount)
 	if err != nil {
 		return model.Summary{}, err
 	}
@@ -184,7 +206,10 @@ func (r *Repository) Summary(ctx context.Context, userID int, month string, from
 	if summary.Expense, err = decimalWithTwoPlaces(rawExpense); err != nil {
 		return model.Summary{}, fmt.Errorf("format expense aggregate: %w", err)
 	}
-	if summary.Balance, err = calculateBalance(summary.Income, summary.Expense); err != nil {
+	if summary.CashOutflow, err = decimalWithTwoPlaces(rawCashOutflow); err != nil {
+		return model.Summary{}, fmt.Errorf("format cash outflow aggregate: %w", err)
+	}
+	if summary.Balance, err = calculateBalance(summary.Income, summary.CashOutflow); err != nil {
 		return model.Summary{}, err
 	}
 	return summary, nil
@@ -195,6 +220,7 @@ type rowScanner interface{ Scan(dest ...any) error }
 func scanTransaction(row rowScanner) (model.Transaction, error) {
 	var transaction model.Transaction
 	var scheduleOccurrenceID pgtype.Int8
+	var investmentScheduleID pgtype.Int8
 	err := row.Scan(
 		&transaction.ID,
 		&transaction.Type,
@@ -207,10 +233,16 @@ func scanTransaction(row rowScanner) (model.Transaction, error) {
 		&transaction.Status,
 		&transaction.ExcludedFromBudget,
 		&scheduleOccurrenceID,
+		&transaction.Purpose,
+		&investmentScheduleID,
 	)
 	if scheduleOccurrenceID.Valid {
 		value := int(scheduleOccurrenceID.Int64)
 		transaction.ScheduleOccurrenceID = &value
+	}
+	if investmentScheduleID.Valid {
+		value := int(investmentScheduleID.Int64)
+		transaction.InvestmentScheduleID = &value
 	}
 	return transaction, err
 }

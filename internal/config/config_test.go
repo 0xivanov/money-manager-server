@@ -50,6 +50,44 @@ func TestLoadRejectsInvalidRedisURL(t *testing.T) {
 	}
 }
 
+func TestLoadRequiresTrading212KeyPair(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("DATABASE_URL", "postgres://money:money@localhost/money")
+	t.Setenv("JWT_SECRET", strings.Repeat("s", 32))
+	t.Setenv("TRADING212_API_KEY", "read-only-key")
+
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "TRADING212_API_KEY and TRADING212_API_SECRET") {
+		t.Fatalf("partial Trading 212 configuration error = %v", err)
+	}
+
+	t.Setenv("TRADING212_API_SECRET", "read-only-secret")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "TRADING212_OWNER_USER_ID") {
+		t.Fatalf("missing Trading 212 owner error = %v", err)
+	}
+	t.Setenv("TRADING212_OWNER_USER_ID", "4")
+	cfg, err := Load()
+	if err != nil || cfg.Trading212APIKey != "read-only-key" || cfg.Trading212APISecret != "read-only-secret" ||
+		cfg.Trading212OwnerUserID != 4 {
+		t.Fatalf("Trading 212 configuration = %#v, %v", cfg, err)
+	}
+}
+
+func TestLoadConfiguresMarketstackHistory(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("DATABASE_URL", "postgres://money:money@localhost/money")
+	t.Setenv("JWT_SECRET", strings.Repeat("s", 32))
+	t.Setenv("MARKETSTACK_API_KEY", "history-key")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MarketstackAPIKey != "history-key" || cfg.MarketstackBaseURL != "https://api.marketstack.com/v2" ||
+		cfg.FrankfurterBaseURL != "https://api.frankfurter.dev/v1" {
+		t.Fatalf("Marketstack configuration = %#v", cfg)
+	}
+}
+
 func TestLoadDoesNotTrustProxyHeadersByDefault(t *testing.T) {
 	clearConfigEnvironment(t)
 	t.Setenv("DATABASE_URL", "postgres://money:money@localhost/money")
@@ -201,6 +239,8 @@ func clearConfigEnvironment(t *testing.T) {
 		"ENABLE_BANKING_RESULT_REDIRECT_URL", "ENABLE_BANKING_CONSENT_DAYS", "ENABLE_BANKING_STATE_TTL",
 		"ENABLE_BANKING_REQUEST_TIMEOUT",
 		"MARKET_DATA_REQUEST_TIMEOUT",
+		"TRADING212_API_KEY", "TRADING212_API_SECRET", "TRADING212_OWNER_USER_ID", "TRADING212_BASE_URL",
+		"MARKETSTACK_API_KEY", "MARKETSTACK_BASE_URL", "FRANKFURTER_BASE_URL",
 		"APNS_KEY_ID", "APNS_TEAM_ID", "APNS_BUNDLE_ID", "APNS_PRIVATE_KEY_BASE64", "APNS_REQUEST_TIMEOUT",
 		"FCM_SERVICE_ACCOUNT_BASE64", "FCM_REQUEST_TIMEOUT",
 	} {

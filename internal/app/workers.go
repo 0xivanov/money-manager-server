@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -170,7 +171,11 @@ func runScheduledTransactionWorker(
 		result, err := maintainer.RunScheduledTransactionMaintenance(runCtx)
 		if err != nil {
 			if ctx.Err() == nil {
-				logger.ErrorContext(ctx, "scheduled transaction maintenance failed", "error", err)
+				cause := errors.Unwrap(err)
+				if cause == nil {
+					cause = err
+				}
+				logger.ErrorContext(ctx, "scheduled transaction maintenance failed", "error", cause)
 			}
 			return
 		}

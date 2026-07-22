@@ -165,9 +165,44 @@ func (s *Service) validateTransaction(ctx context.Context, userID int, request m
 	if err != nil {
 		return model.TransactionRequest{}, err
 	}
+	purpose := strings.ToLower(strings.TrimSpace(request.Purpose))
+	if purpose == "" {
+		if existing != nil && existing.Purpose != "" {
+			purpose = existing.Purpose
+			if request.InvestmentScheduleID == nil {
+				request.InvestmentScheduleID = existing.InvestmentScheduleID
+			}
+		} else {
+			purpose = "spending"
+		}
+	}
+	if purpose != "spending" && purpose != "investment_transfer" {
+		return model.TransactionRequest{}, apperrors.Validation("purpose must be spending or investment_transfer")
+	}
+	if purpose == "investment_transfer" {
+		if transactionType != "expense" || !strings.EqualFold(canonicalCategory, "investment_transfer") {
+			return model.TransactionRequest{}, apperrors.Validation("investment transfers must be expenses in the investment_transfer category")
+		}
+		request.ExcludedFromBudget = true
+		if request.InvestmentScheduleID != nil {
+			schedule, scheduleErr := s.store.GetInvestmentSchedule(ctx, userID, *request.InvestmentScheduleID)
+			if errors.Is(scheduleErr, repository.ErrNotFound) {
+				return model.TransactionRequest{}, apperrors.Validation("investment schedule was not found")
+			}
+			if scheduleErr != nil {
+				return model.TransactionRequest{}, apperrors.Internal(fmt.Errorf("validate investment schedule: %w", scheduleErr))
+			}
+			if schedule.Broker != "revolut_x" {
+				return model.TransactionRequest{}, apperrors.Validation("investment transfer schedule must use Revolut X")
+			}
+		}
+	} else {
+		request.InvestmentScheduleID = nil
+	}
 	return model.TransactionRequest{
 		Type: transactionType, Category: canonicalCategory, Description: description,
 		Amount: amount, Currency: currency, OccurredAt: date.Format("2006-01-02"),
 		ExcludedFromBudget: request.ExcludedFromBudget,
+		Purpose:            purpose, InvestmentScheduleID: request.InvestmentScheduleID,
 	}, nil
 }

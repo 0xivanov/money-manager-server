@@ -11,10 +11,17 @@ import (
 func transactionsCSV(transactions []model.Transaction) ([]byte, error) {
 	var buffer bytes.Buffer
 	writer := csv.NewWriter(&buffer)
-	if err := writer.Write([]string{"occurred_at", "type", "category", "description", "amount", "currency", "source", "status", "excluded_from_budget"}); err != nil {
+	if err := writer.Write([]string{
+		"occurred_at", "type", "category", "description", "amount", "currency", "source", "status",
+		"excluded_from_budget", "purpose", "investment_schedule_id",
+	}); err != nil {
 		return nil, err
 	}
 	for _, transaction := range transactions {
+		investmentScheduleID := ""
+		if transaction.InvestmentScheduleID != nil {
+			investmentScheduleID = strconv.Itoa(*transaction.InvestmentScheduleID)
+		}
 		if err := writer.Write([]string{
 			transaction.OccurredAt,
 			transaction.Type,
@@ -25,6 +32,8 @@ func transactionsCSV(transactions []model.Transaction) ([]byte, error) {
 			transaction.Source,
 			transaction.Status,
 			strconv.FormatBool(transaction.ExcludedFromBudget),
+			transaction.Purpose,
+			investmentScheduleID,
 		}); err != nil {
 			return nil, err
 		}
@@ -40,7 +49,7 @@ func investmentTradesCSV(trades []model.InvestmentTrade) ([]byte, error) {
 	var buffer bytes.Buffer
 	writer := csv.NewWriter(&buffer)
 	if err := writer.Write([]string{
-		"occurred_at", "asset_type", "symbol", "asset_name", "broker", "side",
+		"occurred_at", "asset_type", "symbol", "asset_name", "exchange", "market_currency", "broker", "side",
 		"amount", "quantity", "price_per_unit", "price_provider", "price_as_of",
 		"fees", "currency", "notes",
 	}); err != nil {
@@ -48,7 +57,7 @@ func investmentTradesCSV(trades []model.InvestmentTrade) ([]byte, error) {
 	}
 	for _, trade := range trades {
 		if err := writer.Write([]string{
-			trade.OccurredAt, trade.AssetType, trade.Symbol, trade.AssetName, trade.Broker,
+			trade.OccurredAt, trade.AssetType, trade.Symbol, trade.AssetName, trade.Exchange, trade.MarketCurrency, trade.Broker,
 			trade.Side, trade.Amount, trade.Quantity, trade.PricePerUnit, trade.PriceProvider,
 			trade.PriceAsOf, trade.Fees, trade.Currency, trade.Notes,
 		}); err != nil {

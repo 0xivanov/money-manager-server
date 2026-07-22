@@ -93,9 +93,11 @@ type investmentStore interface {
 	CreateInvestmentTrade(context.Context, int, model.InvestmentTradeRequest) (model.InvestmentTrade, error)
 	ListInvestmentTrades(context.Context, int, repository.InvestmentTradeFilter) ([]model.InvestmentTrade, error)
 	DeleteInvestmentTrade(context.Context, int, int) error
-	InvestmentHoldingQuantity(context.Context, int, string, string, string) (string, error)
+	InvestmentHoldingQuantity(context.Context, int, string, string, string, string) (string, error)
 	ListInvestmentPrices(context.Context) ([]model.InvestmentPrice, error)
 	UpsertManualInvestmentPrice(context.Context, int, model.InvestmentPriceRequest, time.Time) (model.InvestmentPrice, error)
+	ListInvestmentMarketHistory(context.Context, string, string, string, string, time.Time) ([]model.InvestmentMarketHistoryPrice, error)
+	UpsertInvestmentMarketHistory(context.Context, []model.InvestmentMarketHistoryPrice) error
 	CreateInvestmentSchedule(context.Context, int, model.InvestmentScheduleRequest) (model.InvestmentSchedule, error)
 	ListInvestmentSchedules(context.Context, int, string) ([]model.InvestmentSchedule, error)
 	GetInvestmentSchedule(context.Context, int, int) (model.InvestmentSchedule, error)

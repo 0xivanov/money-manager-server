@@ -17,6 +17,12 @@ func Load() (Config, error) {
 		EnableBankingApplicationID:     strings.TrimSpace(os.Getenv("ENABLE_BANKING_APPLICATION_ID")),
 		EnableBankingCallbackURL:       strings.TrimSpace(os.Getenv("ENABLE_BANKING_CALLBACK_URL")),
 		EnableBankingResultRedirectURL: strings.TrimSpace(os.Getenv("ENABLE_BANKING_RESULT_REDIRECT_URL")),
+		Trading212APIKey:               strings.TrimSpace(os.Getenv("TRADING212_API_KEY")),
+		Trading212APISecret:            strings.TrimSpace(os.Getenv("TRADING212_API_SECRET")),
+		Trading212BaseURL:              envOrDefault("TRADING212_BASE_URL", "https://live.trading212.com/api/v0"),
+		MarketstackAPIKey:              strings.TrimSpace(os.Getenv("MARKETSTACK_API_KEY")),
+		MarketstackBaseURL:             envOrDefault("MARKETSTACK_BASE_URL", "https://api.marketstack.com/v2"),
+		FrankfurterBaseURL:             envOrDefault("FRANKFURTER_BASE_URL", "https://api.frankfurter.dev/v1"),
 	}
 
 	keySources, err := readEnableBankingKeySources()
@@ -100,6 +106,9 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if cfg.MarketDataRequestTimeout, err = durationEnv("MARKET_DATA_REQUEST_TIMEOUT", 15*time.Second); err != nil {
+		return Config{}, err
+	}
+	if cfg.Trading212OwnerUserID, err = intEnv("TRADING212_OWNER_USER_ID", 0); err != nil {
 		return Config{}, err
 	}
 	if cfg.APNSRequestTimeout, err = durationEnv("APNS_REQUEST_TIMEOUT", 10*time.Second); err != nil {

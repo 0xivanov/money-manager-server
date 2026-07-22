@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"money-manager-server/internal/apperrors"
+	"money-manager-server/internal/marketdata"
 	"money-manager-server/internal/model"
 	"money-manager-server/internal/repository"
 )
@@ -31,27 +32,39 @@ func (s *Service) CreateInvestmentTrade(
 	if err != nil {
 		return model.InvestmentTrade{}, err
 	}
-	if s.marketData == nil {
-		return model.InvestmentTrade{}, apperrors.Unavailable(
-			"crypto market pricing is temporarily unavailable", errors.New("market data client is not configured"),
-		)
-	}
 	occurredAt, err := time.Parse(time.RFC3339, normalized.OccurredAt)
 	if err != nil {
 		return model.InvestmentTrade{}, apperrors.Internal(fmt.Errorf("parse normalized investment timestamp: %w", err))
 	}
-	quote, err := s.marketData.QuoteAt(ctx, normalized.Symbol, normalized.Currency, occurredAt)
+	var quote investmentMarketQuote
+	if normalized.AssetType == "stock" {
+		if !s.canUseTrading212(userID) {
+			return model.InvestmentTrade{}, apperrors.Unavailable(
+				"Trading 212 integration is not available for this account", errors.New("Trading 212 owner check rejected the request"),
+			)
+		}
+		quote, err = s.stockMarketData.QuoteAt(ctx, marketdata.EquityInstrument{
+			Symbol: normalized.Symbol, Exchange: normalized.Exchange, MarketCurrency: normalized.MarketCurrency,
+		}, normalized.Currency, occurredAt)
+	} else {
+		if s.marketData == nil {
+			return model.InvestmentTrade{}, apperrors.Unavailable(
+				"crypto market pricing is temporarily unavailable", errors.New("market data client is not configured"),
+			)
+		}
+		quote, err = s.marketData.QuoteAt(ctx, normalized.Symbol, normalized.Currency, occurredAt)
+	}
 	if err != nil {
-		return model.InvestmentTrade{}, apperrors.Unavailable("crypto market pricing is temporarily unavailable", err)
+		return model.InvestmentTrade{}, apperrors.Unavailable(normalized.AssetType+" market pricing is temporarily unavailable", err)
 	}
 	price, err := normalizeUnsignedDecimal(quote.Price, "market price", 12, 8, false)
 	if err != nil {
-		return model.InvestmentTrade{}, apperrors.Unavailable("crypto market pricing returned an invalid price", err)
+		return model.InvestmentTrade{}, apperrors.Unavailable(normalized.AssetType+" market pricing returned an invalid price", err)
 	}
 	provider, err := normalizeLimitedText(quote.Provider, "market price provider", 100, false)
 	if err != nil || quote.AsOf.IsZero() {
 		return model.InvestmentTrade{}, apperrors.Unavailable(
-			"crypto market pricing returned an invalid quote", errors.New("market quote audit data is missing"),
+			normalized.AssetType+" market pricing returned an invalid quote", errors.New("market quote audit data is missing"),
 		)
 	}
 	amountNumber, _ := new(big.Rat).SetString(normalized.Amount)
@@ -70,7 +83,7 @@ func (s *Service) CreateInvestmentTrade(
 		if fees.Cmp(amountNumber) >= 0 {
 			return model.InvestmentTrade{}, apperrors.Validation("sell fees must be less than the sold amount")
 		}
-		holding, err := s.store.InvestmentHoldingQuantity(ctx, userID, normalized.AssetType, normalized.Symbol, normalized.Broker)
+		holding, err := s.store.InvestmentHoldingQuantity(ctx, userID, normalized.AssetType, normalized.Symbol, normalized.Exchange, normalized.Broker)
 		if err != nil {
 			return model.InvestmentTrade{}, apperrors.Internal(fmt.Errorf("get investment holding: %w", err))
 		}

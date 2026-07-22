@@ -26,6 +26,23 @@ type investmentMarketDataClient interface {
 	DailyHistory(context.Context, string, string, time.Time) ([]investmentMarketHistoryPoint, error)
 }
 
+type stockInvestmentMarketDataClient interface {
+	QuoteAt(context.Context, marketdata.EquityInstrument, string, time.Time) (investmentMarketQuote, error)
+	CurrentQuote(context.Context, marketdata.EquityInstrument, string) (investmentMarketQuote, error)
+}
+
+type stockInvestmentHistoryClient interface {
+	DailyHistory(context.Context, marketdata.EquityInstrument, string, time.Time) ([]investmentMarketHistoryPoint, error)
+}
+
+type trading212InvestmentMarketData struct {
+	client *marketdata.Trading212Client
+}
+
+type marketstackInvestmentHistory struct {
+	client *marketdata.MarketstackClient
+}
+
 type krakenInvestmentMarketData struct {
 	provider            marketdata.Provider
 	longHistoryProvider marketdata.DailyHistoryProvider
@@ -56,6 +73,59 @@ func (s *Service) configureInvestmentMarketData(cfg config.Config) {
 	s.marketData = &krakenInvestmentMarketData{
 		provider: client, longHistoryProvider: longHistoryClient, now: s.now,
 	}
+	if cfg.Trading212APIKey != "" && cfg.Trading212APISecret != "" {
+		stockClient, stockErr := marketdata.NewTrading212(marketdata.Trading212Config{
+			BaseURL: cfg.Trading212BaseURL, APIKey: cfg.Trading212APIKey, APISecret: cfg.Trading212APISecret,
+			HTTPClient: &http.Client{Timeout: timeout}, Now: s.now, OperationTimeout: timeout,
+		})
+		if stockErr == nil {
+			s.stockMarketData = &trading212InvestmentMarketData{client: stockClient}
+		}
+	}
+	if cfg.MarketstackAPIKey != "" {
+		historyClient, historyClientErr := marketdata.NewMarketstack(marketdata.MarketstackConfig{
+			BaseURL: cfg.MarketstackBaseURL, APIKey: cfg.MarketstackAPIKey,
+			FrankfurterURL: cfg.FrankfurterBaseURL,
+			HTTPClient:     &http.Client{Timeout: timeout}, Now: s.now, OperationTimeout: timeout,
+		})
+		if historyClientErr == nil {
+			s.stockHistoryData = &marketstackInvestmentHistory{client: historyClient}
+		}
+	}
+}
+
+func (m *marketstackInvestmentHistory) DailyHistory(
+	ctx context.Context, instrument marketdata.EquityInstrument, currency string, since time.Time,
+) ([]investmentMarketHistoryPoint, error) {
+	points, err := m.client.DailyHistory(ctx, instrument, currency, since)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]investmentMarketHistoryPoint, 0, len(points))
+	for _, point := range points {
+		result = append(result, investmentMarketHistoryPoint{Price: point.Close, AsOf: point.AsOf})
+	}
+	return result, nil
+}
+
+func (t *trading212InvestmentMarketData) QuoteAt(
+	ctx context.Context, instrument marketdata.EquityInstrument, currency string, at time.Time,
+) (investmentMarketQuote, error) {
+	quote, err := t.client.QuoteAt(ctx, instrument, currency, at)
+	if err != nil {
+		return investmentMarketQuote{}, err
+	}
+	return investmentMarketQuote{Price: quote.Price, Provider: quote.Provider, AsOf: quote.AsOf}, nil
+}
+
+func (t *trading212InvestmentMarketData) CurrentQuote(
+	ctx context.Context, instrument marketdata.EquityInstrument, currency string,
+) (investmentMarketQuote, error) {
+	quote, err := t.client.CurrentQuote(ctx, instrument, currency)
+	if err != nil {
+		return investmentMarketQuote{}, err
+	}
+	return investmentMarketQuote{Price: quote.Price, Provider: quote.Provider, AsOf: quote.AsOf}, nil
 }
 
 func (k *krakenInvestmentMarketData) QuoteAt(

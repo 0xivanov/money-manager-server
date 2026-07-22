@@ -72,6 +72,30 @@ func (c Config) validateAt(now time.Time) error {
 	if c.MarketDataRequestTimeout > time.Minute {
 		errs = append(errs, errors.New("MARKET_DATA_REQUEST_TIMEOUT must be no more than 1m"))
 	}
+	if strings.TrimSpace(c.Trading212BaseURL) != "" {
+		parsed, err := url.Parse(c.Trading212BaseURL)
+		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") ||
+			parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+			errs = append(errs, errors.New("TRADING212_BASE_URL must be an absolute HTTP URL without credentials, query, or fragment"))
+		}
+	}
+	if (strings.TrimSpace(c.Trading212APIKey) == "") != (strings.TrimSpace(c.Trading212APISecret) == "") {
+		errs = append(errs, errors.New("TRADING212_API_KEY and TRADING212_API_SECRET must be configured together"))
+	}
+	trading212Configured := strings.TrimSpace(c.Trading212APIKey) != "" && strings.TrimSpace(c.Trading212APISecret) != ""
+	if trading212Configured != (c.Trading212OwnerUserID > 0) {
+		errs = append(errs, errors.New("TRADING212_API_KEY, TRADING212_API_SECRET, and a positive TRADING212_OWNER_USER_ID must be configured together"))
+	}
+	for name, value := range map[string]string{
+		"MARKETSTACK_BASE_URL": c.MarketstackBaseURL,
+		"FRANKFURTER_BASE_URL": c.FrankfurterBaseURL,
+	} {
+		parsed, err := url.Parse(value)
+		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") ||
+			parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+			errs = append(errs, fmt.Errorf("%s must be an absolute HTTP URL without credentials, query, or fragment", name))
+		}
+	}
 	if c.TrustedProxyHops < 0 {
 		errs = append(errs, errors.New("TRUSTED_PROXY_HOPS cannot be negative"))
 	}

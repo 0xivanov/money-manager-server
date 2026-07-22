@@ -21,6 +21,9 @@ type Service struct {
 	openBankingConfig   openBankingServiceConfig
 	openBankingError    error
 	marketData          investmentMarketDataClient
+	stockMarketData     stockInvestmentMarketDataClient
+	stockHistoryData    stockInvestmentHistoryClient
+	trading212OwnerID   int
 	investmentCache     investmentResponseCache
 	pushSenders         map[string]notificationSender
 	pushPlatforms       []string
@@ -65,12 +68,17 @@ func NewWithStore(store Store, cfg config.Config) *Service {
 		legacyAcceptUntil:   cfg.JWTLegacyAcceptUntil,
 		now:                 time.Now,
 		scheduleHorizonDays: 90,
+		trading212OwnerID:   cfg.Trading212OwnerUserID,
 	}
 	result.configureOpenBanking(cfg)
 	result.configureInvestmentMarketData(cfg)
 	result.configureInvestmentResponseCache(cfg)
 	result.configurePush(cfg)
 	return result
+}
+
+func (s *Service) canUseTrading212(userID int) bool {
+	return s.stockMarketData != nil && s.trading212OwnerID > 0 && userID == s.trading212OwnerID
 }
 
 func (s *Service) Close() {

@@ -1,45 +1,52 @@
 package model
 
+import "time"
+
 type InvestmentTrade struct {
-	ID            int    `json:"id"`
-	AssetType     string `json:"asset_type"`
-	Symbol        string `json:"symbol"`
-	AssetName     string `json:"asset_name"`
-	Broker        string `json:"broker"`
-	Side          string `json:"side"`
-	Amount        string `json:"amount"`
-	Quantity      string `json:"quantity"`
-	PricePerUnit  string `json:"price_per_unit"`
-	PriceProvider string `json:"price_provider"`
-	PriceAsOf     string `json:"price_as_of"`
-	Fees          string `json:"fees"`
-	Currency      string `json:"currency"`
-	OccurredAt    string `json:"occurred_at"`
-	Notes         string `json:"notes"`
-	CreatedAt     string `json:"created_at"`
-	UpdatedAt     string `json:"updated_at"`
+	ID             int    `json:"id"`
+	AssetType      string `json:"asset_type"`
+	Symbol         string `json:"symbol"`
+	AssetName      string `json:"asset_name"`
+	Exchange       string `json:"exchange,omitempty"`
+	MarketCurrency string `json:"market_currency"`
+	Broker         string `json:"broker"`
+	Side           string `json:"side"`
+	Amount         string `json:"amount"`
+	Quantity       string `json:"quantity"`
+	PricePerUnit   string `json:"price_per_unit"`
+	PriceProvider  string `json:"price_provider"`
+	PriceAsOf      string `json:"price_as_of"`
+	Fees           string `json:"fees"`
+	Currency       string `json:"currency"`
+	OccurredAt     string `json:"occurred_at"`
+	Notes          string `json:"notes"`
+	CreatedAt      string `json:"created_at"`
+	UpdatedAt      string `json:"updated_at"`
 }
 
 type InvestmentTradeRequest struct {
-	AssetType     string `json:"asset_type"`
-	Symbol        string `json:"symbol"`
-	AssetName     string `json:"asset_name"`
-	Broker        string `json:"broker"`
-	Side          string `json:"side"`
-	Amount        string `json:"amount"`
-	Quantity      string `json:"quantity,omitempty"`
-	PricePerUnit  string `json:"price_per_unit,omitempty"`
-	PriceProvider string `json:"-"`
-	PriceAsOf     string `json:"-"`
-	Fees          string `json:"fees,omitempty"`
-	Currency      string `json:"currency,omitempty"`
-	OccurredAt    string `json:"occurred_at"`
-	Notes         string `json:"notes,omitempty"`
+	AssetType      string `json:"asset_type"`
+	Symbol         string `json:"symbol"`
+	AssetName      string `json:"asset_name"`
+	Exchange       string `json:"exchange,omitempty"`
+	MarketCurrency string `json:"market_currency,omitempty"`
+	Broker         string `json:"broker"`
+	Side           string `json:"side"`
+	Amount         string `json:"amount"`
+	Quantity       string `json:"quantity,omitempty"`
+	PricePerUnit   string `json:"price_per_unit,omitempty"`
+	PriceProvider  string `json:"-"`
+	PriceAsOf      string `json:"-"`
+	Fees           string `json:"fees,omitempty"`
+	Currency       string `json:"currency,omitempty"`
+	OccurredAt     string `json:"occurred_at"`
+	Notes          string `json:"notes,omitempty"`
 }
 
 type InvestmentPrice struct {
 	AssetType string `json:"asset_type"`
 	Symbol    string `json:"symbol"`
+	Exchange  string `json:"exchange,omitempty"`
 	Currency  string `json:"currency"`
 	Price     string `json:"price"`
 	Provider  string `json:"provider"`
@@ -58,6 +65,8 @@ type InvestmentPosition struct {
 	AssetType        string `json:"asset_type"`
 	Symbol           string `json:"symbol"`
 	AssetName        string `json:"asset_name"`
+	Exchange         string `json:"exchange,omitempty"`
+	MarketCurrency   string `json:"market_currency"`
 	Broker           string `json:"broker"`
 	Quantity         string `json:"quantity"`
 	AverageCost      string `json:"average_cost"`
@@ -85,9 +94,18 @@ type InvestmentPortfolio struct {
 }
 
 type InvestmentPortfolioHistoryPoint struct {
-	AsOf           string `json:"as_of"`
-	Value          string `json:"value"`
-	InvestedAmount string `json:"invested_amount"`
+	AsOf           string                              `json:"as_of"`
+	Value          string                              `json:"value"`
+	InvestedAmount string                              `json:"invested_amount"`
+	Holdings       []InvestmentPortfolioHistoryHolding `json:"holdings"`
+}
+
+type InvestmentPortfolioHistoryHolding struct {
+	AssetType string `json:"asset_type"`
+	Symbol    string `json:"symbol"`
+	AssetName string `json:"asset_name"`
+	Exchange  string `json:"exchange,omitempty"`
+	Value     string `json:"value"`
 }
 
 type InvestmentPortfolioHistory struct {
@@ -97,12 +115,24 @@ type InvestmentPortfolioHistory struct {
 	UnsupportedPositions int                               `json:"unsupported_positions"`
 }
 
+type InvestmentMarketHistoryPrice struct {
+	AssetType string
+	Symbol    string
+	Exchange  string
+	Currency  string
+	Price     string
+	Provider  string
+	AsOf      time.Time
+}
+
 type InvestmentSchedule struct {
 	ID                int    `json:"id"`
 	UserID            int    `json:"-"`
 	AssetType         string `json:"asset_type"`
 	Symbol            string `json:"symbol"`
 	AssetName         string `json:"asset_name"`
+	Exchange          string `json:"exchange,omitempty"`
+	MarketCurrency    string `json:"market_currency"`
 	Broker            string `json:"broker"`
 	Amount            string `json:"amount"`
 	Currency          string `json:"currency"`
@@ -124,6 +154,8 @@ type InvestmentScheduleRequest struct {
 	AssetType         string `json:"asset_type"`
 	Symbol            string `json:"symbol"`
 	AssetName         string `json:"asset_name"`
+	Exchange          string `json:"exchange,omitempty"`
+	MarketCurrency    string `json:"market_currency,omitempty"`
 	Broker            string `json:"broker"`
 	Amount            string `json:"amount"`
 	Currency          string `json:"currency,omitempty"`
