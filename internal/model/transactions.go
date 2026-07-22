@@ -12,20 +12,20 @@ type Transaction struct {
 	Status               string `json:"status"`
 	ExcludedFromBudget   bool   `json:"excluded_from_budget"`
 	ScheduleOccurrenceID *int   `json:"schedule_occurrence_id,omitempty"`
-	Purpose              string `json:"purpose"`
-	InvestmentScheduleID *int   `json:"investment_schedule_id,omitempty"`
 }
 
 type TransactionRequest struct {
-	Type                 string `json:"type"`
-	Category             string `json:"category"`
-	Description          string `json:"description"`
-	Amount               string `json:"amount"`
-	Currency             string `json:"currency"`
-	OccurredAt           string `json:"occurred_at"`
-	ExcludedFromBudget   bool   `json:"excluded_from_budget"`
-	Purpose              string `json:"purpose,omitempty"`
-	InvestmentScheduleID *int   `json:"investment_schedule_id,omitempty"`
+	Type               string `json:"type"`
+	Category           string `json:"category"`
+	Description        string `json:"description"`
+	Amount             string `json:"amount"`
+	Currency           string `json:"currency"`
+	OccurredAt         string `json:"occurred_at"`
+	ExcludedFromBudget bool   `json:"excluded_from_budget"`
+	// Accepted temporarily so older mobile builds receive a normal category
+	// validation response instead of failing strict JSON decoding.
+	LegacyPurpose              string `json:"purpose,omitempty"`
+	LegacyInvestmentScheduleID *int   `json:"investment_schedule_id,omitempty"`
 }
 
 type Category struct {

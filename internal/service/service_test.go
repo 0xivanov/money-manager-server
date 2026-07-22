@@ -176,35 +176,6 @@ func TestCreateTransactionRejectsInvalidMoneyAndCategory(t *testing.T) {
 	}
 }
 
-func TestCreateInvestmentTransferExcludesSpendingAndLinksRevolutXSchedule(t *testing.T) {
-	scheduleID := 42
-	store := &fakeStore{
-		findCategory: func(context.Context, int, string, string) (string, error) {
-			return "investment_transfer", nil
-		},
-		getInvestmentSchedule: func(context.Context, int, int) (model.InvestmentSchedule, error) {
-			return model.InvestmentSchedule{ID: scheduleID, Broker: "revolut_x"}, nil
-		},
-		createTransaction: func(_ context.Context, _ int, request model.TransactionRequest) (model.Transaction, error) {
-			if request.Purpose != "investment_transfer" || !request.ExcludedFromBudget {
-				t.Fatalf("investment transfer was not normalized: %#v", request)
-			}
-			if request.InvestmentScheduleID == nil || *request.InvestmentScheduleID != scheduleID {
-				t.Fatalf("investment schedule link = %#v", request.InvestmentScheduleID)
-			}
-			return model.Transaction{ID: 1, Purpose: request.Purpose}, nil
-		},
-	}
-	service := testService(store)
-	transaction, err := service.CreateTransaction(context.Background(), 1, model.TransactionRequest{
-		Type: "expense", Category: "investment_transfer", Amount: "25", Currency: "EUR",
-		OccurredAt: "2026-07-18", Purpose: "investment_transfer", InvestmentScheduleID: &scheduleID,
-	})
-	if err != nil || transaction.Purpose != "investment_transfer" {
-		t.Fatalf("CreateTransaction() = %#v, %v", transaction, err)
-	}
-}
-
 func TestListTransactionsRequiresValidMonth(t *testing.T) {
 	service := testService(&fakeStore{})
 	if _, err := service.ListTransactions(context.Background(), 1, "July", "", ""); apperrors.KindOf(err) != apperrors.KindValidation {

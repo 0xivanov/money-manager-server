@@ -7,7 +7,7 @@ import (
 )
 
 var defaultCategories = map[string][]string{
-	"expense": {"groceries", "dining_out", "going_out", "transport", "housing", "utilities", "health", "entertainment", "shopping", "travel", "education", "beauty", "investment_transfer", "other"},
+	"expense": {"groceries", "dining_out", "going_out", "transport", "housing", "utilities", "health", "entertainment", "shopping", "travel", "education", "beauty", "other"},
 	"income":  {"salary", "freelance", "gift", "investment", "refund", "other"},
 }
 

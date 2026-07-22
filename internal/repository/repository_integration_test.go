@@ -38,8 +38,16 @@ func TestRepositoryIntegration(t *testing.T) {
 		t.Fatalf("find user = %#v, %v", record, err)
 	}
 	categories, err := repo.ListCategories(ctx, user.ID, "expense")
-	if err != nil || len(categories) != 14 {
+	if err != nil || len(categories) != 13 {
 		t.Fatalf("expense categories = %d, %v", len(categories), err)
+	}
+	if _, err := repo.FindActiveCategoryName(ctx, user.ID, "expense", "investment_transfer"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("removed investment transfer category error = %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO transactions(
+		user_id,type,category,amount,currency,occurred_at,purpose
+	) VALUES($1,'expense','other',25,'EUR','2026-07-11','investment_transfer')`, user.ID); err == nil {
+		t.Fatal("investment transfer purpose was accepted")
 	}
 	category, err := repo.FindActiveCategoryName(ctx, user.ID, "expense", "GROCERIES")
 	if err != nil || category != "groceries" {
@@ -343,6 +351,38 @@ func TestRepositoryIntegration(t *testing.T) {
 	if reimportedTransactions != 0 || suppressions != 1 {
 		t.Fatalf("deleted bank transaction reimported=%d suppressions=%d", reimportedTransactions, suppressions)
 	}
+	var replacementConnectionID, replacementAccountID int
+	if err := pool.QueryRow(ctx, `INSERT INTO open_banking_connections(
+		user_id,provider_session_id,institution_name,country,psu_type,status,valid_until
+	) VALUES($1,'replacement-session','Replacement Bank','BG','personal','AUTHORIZED',now()+interval '30 days')
+	RETURNING id`, user.ID).Scan(&replacementConnectionID); err != nil {
+		t.Fatalf("create replacement bank connection: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO open_banking_accounts(
+		connection_id,provider_account_id,identification_hash,name,cash_account_type,currency,provider_payload
+	) VALUES($1,'replacement-provider-account','replacement-account','Replacement','CACC','EUR','{}')
+	RETURNING id`, replacementConnectionID).Scan(&replacementAccountID); err != nil {
+		t.Fatalf("create replacement bank account: %v", err)
+	}
+	replacementSync, err := repo.ImportOpenBankingTransactions(ctx, user.ID, replacementAccountID, []OpenBankingTransactionSeed{{
+		ExternalID: "bank-transaction-2", Type: "expense", Category: "transport",
+		Description: "Metro", Amount: "2.00", Currency: "EUR",
+		OccurredAt: monthStart.AddDate(0, 0, 11), Status: "booked", Metadata: []byte(`{"mcc":"4111"}`),
+	}}, claimTime)
+	if err != nil || replacementSync.Imported != 0 || replacementSync.Updated != 0 || replacementSync.Unchanged != 0 {
+		t.Fatalf("sync after bank account replacement = %#v, %v", replacementSync, err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM transactions
+		WHERE user_id=$1 AND external_id='bank-transaction-2'`, user.ID,
+	).Scan(&reimportedTransactions); err != nil {
+		t.Fatal(err)
+	}
+	if reimportedTransactions != 0 {
+		t.Fatalf("deleted bank transaction reimported through replacement account=%d", reimportedTransactions)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM open_banking_connections WHERE id=$1`, replacementConnectionID); err != nil {
+		t.Fatalf("remove replacement bank connection: %v", err)
+	}
 	scheduleReminders, err := repo.QueueDueTransactionScheduleReminders(ctx, claimTime, 10)
 	if err != nil || scheduleReminders != 0 {
 		t.Fatalf("queue due transaction schedule reminders = %d, %v", scheduleReminders, err)
@@ -458,6 +498,89 @@ func TestRepositoryIntegration(t *testing.T) {
 		  AND payload @> jsonb_build_object('investment_trade_id',$1::bigint)`, postedTrade.ID,
 	).Scan(&postedNotifications); err != nil || postedNotifications != 1 {
 		t.Fatalf("scheduled investment notifications = %d, %v", postedNotifications, err)
+	}
+}
+
+func TestRevolutTopupCleanupMigration(t *testing.T) {
+	ctx, repo, pool := openIntegrationRepository(t)
+	if _, err := pool.Exec(ctx, `CREATE TABLE schema_migrations (
+		version BIGINT PRIMARY KEY,
+		name TEXT NOT NULL,
+		applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	); INSERT INTO schema_migrations(version,name) VALUES(21,'deferred-topup-cleanup')`); err != nil {
+		t.Fatalf("defer top-up cleanup migration: %v", err)
+	}
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatalf("migrate through durable suppressions: %v", err)
+	}
+	user, err := repo.RegisterUser(ctx, "topup-cleanup@example.com", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var revolutConnectionID, otherConnectionID int
+	if err := pool.QueryRow(ctx, `INSERT INTO open_banking_connections(
+		user_id,provider_session_id,institution_name,country,psu_type,status,valid_until
+	) VALUES($1,'topup-revolut','Revolut Bank UAB','BG','personal','AUTHORIZED',now()+interval '30 days')
+	RETURNING id`, user.ID).Scan(&revolutConnectionID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO open_banking_connections(
+		user_id,provider_session_id,institution_name,country,psu_type,status,valid_until
+	) VALUES($1,'topup-other','Another Bank','BG','personal','AUTHORIZED',now()+interval '30 days')
+	RETURNING id`, user.ID).Scan(&otherConnectionID); err != nil {
+		t.Fatal(err)
+	}
+	var revolutAccountID, otherAccountID int
+	if err := pool.QueryRow(ctx, `INSERT INTO open_banking_accounts(
+		connection_id,provider_account_id,identification_hash,name,cash_account_type,currency,provider_payload
+	) VALUES($1,'revolut-account','revolut-account-hash','Revolut','CACC','EUR','{}') RETURNING id`,
+		revolutConnectionID,
+	).Scan(&revolutAccountID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO open_banking_accounts(
+		connection_id,provider_account_id,identification_hash,name,cash_account_type,currency,provider_payload
+	) VALUES($1,'other-account','other-account-hash','Other','CACC','EUR','{}') RETURNING id`,
+		otherConnectionID,
+	).Scan(&otherAccountID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO transactions(
+		user_id,type,category,description,amount,currency,occurred_at,source,status,
+		source_account_id,external_id,source_metadata
+	) VALUES
+		($1,'income','other','Top-Up by *9147',700,'EUR','2026-07-22','open_banking','booked',$2,
+			'revolut-topup','{"bank_transaction_code":"TOPUP"}'),
+		($1,'income','salary','Monthly salary',3000,'EUR','2026-07-22','open_banking','booked',$2,
+			'revolut-salary','{"bank_transaction_code":"TRANSFER"}'),
+		($1,'income','other','Other bank top-up',100,'EUR','2026-07-22','open_banking','booked',$3,
+			'other-topup','{"bank_transaction_code":"TOPUP"}')`, user.ID, revolutAccountID, otherAccountID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM schema_migrations WHERE version=21`); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatalf("apply top-up cleanup migration: %v", err)
+	}
+	var remainingTransactions, suppressions int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM transactions WHERE user_id=$1`, user.ID).Scan(&remainingTransactions); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM open_banking_transaction_suppressions
+		WHERE user_id=$1 AND external_id='revolut-topup'`, user.ID).Scan(&suppressions); err != nil {
+		t.Fatal(err)
+	}
+	if remainingTransactions != 2 || suppressions != 1 {
+		t.Fatalf("top-up cleanup remaining=%d suppressions=%d", remainingTransactions, suppressions)
+	}
+	result, err := repo.ImportOpenBankingTransactions(ctx, user.ID, revolutAccountID, []OpenBankingTransactionSeed{{
+		ExternalID: "revolut-topup", Type: "income", Category: "other", Description: "Top-Up by *9147",
+		Amount: "700.00", Currency: "EUR", OccurredAt: time.Date(2026, 7, 22, 0, 0, 0, 0, time.UTC),
+		Status: "booked", Metadata: []byte(`{"bank_transaction_code":"TOPUP"}`),
+	}}, time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC))
+	if err != nil || result.Imported != 0 || result.Updated != 0 || result.Unchanged != 0 {
+		t.Fatalf("suppressed top-up reimport = %#v, %v", result, err)
 	}
 }
 

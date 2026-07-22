@@ -293,6 +293,12 @@ func isRevolutTopUpTransaction(institutionName string, transaction enableBanking
 	if !strings.Contains(strings.ToLower(strings.TrimSpace(institutionName)), "revolut") {
 		return false
 	}
+	code := strings.ToUpper(strings.TrimSpace(transaction.BankTransactionCode.Code))
+	code = strings.NewReplacer("-", "", "_", "", " ", "").Replace(code)
+	switch code {
+	case "TOPUP", "CARDTOPUP", "TOPUPRETURN", "CARDTOPUPRETURN":
+		return true
+	}
 	text := strings.ToLower(openBankingTransactionClassificationText(transaction, ""))
 	text = strings.Join(strings.Fields(strings.NewReplacer("-", " ", "_", " ").Replace(text)), " ")
 	for _, marker := range []string{

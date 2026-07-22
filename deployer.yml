@@ -1,5 +1,5 @@
 name: money-manager-api
-image: ghcr.io/0xivanov/money-manager-server@sha256:099364941cfe2be3a5108455fa95a5eca330f29757517745761717c2655e78d1
+image: ghcr.io/0xivanov/money-manager-server@sha256:a6e64ece19ac7916af9847187994c6ff90a0cdaab9cf183a1d32f0a819734228
 
 service:
   port: 8080

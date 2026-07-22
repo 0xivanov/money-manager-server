@@ -11,7 +11,7 @@ func TestOpenBankingOverrideMetadataKeepsFreshClassificationAndOverrideMarkers(t
 		"classified_category":"transport",
 		"classified_type":"expense",
 		"category_source":"expense_keyword"
-	}`), true, true, true)
+	}`), true, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -25,8 +25,7 @@ func TestOpenBankingOverrideMetadataKeepsFreshClassificationAndOverrideMarkers(t
 		values["category_source"] != "user_override" ||
 		values["classification_override"] != true ||
 		values["type_override"] != true ||
-		values["category_override"] != true ||
-		values["purpose_override"] != true {
+		values["category_override"] != true {
 		t.Fatalf("override metadata = %#v", values)
 	}
 }

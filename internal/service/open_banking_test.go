@@ -431,6 +431,21 @@ func TestNormalizeOpenBankingTransactionUsesRevolutFriendlyKeywordFallbacks(t *t
 
 func TestNormalizeOpenBankingTransactionIgnoresOnlyRevolutTopUps(t *testing.T) {
 	today := time.Date(2026, 7, 13, 0, 0, 0, 0, time.UTC)
+	codeTopUp := json.RawMessage(`{
+		"entry_reference":"coded-top-up",
+		"transaction_amount":{"currency":"EUR","amount":"700"},
+		"credit_debit_indicator":"CRDT",
+		"status":"BOOK",
+		"booking_date":"2026-07-12",
+		"debtor":{"name":"Top-Up by *9147"},
+		"bank_transaction_code":{"code":"TOPUP"}
+	}`)
+	if item, included := normalizeOpenBankingTransactionForInstitution(codeTopUp, today, "Revolut Bank UAB"); included {
+		t.Fatalf("coded Revolut top-up was included: %#v", item)
+	}
+	if item, included := normalizeOpenBankingTransactionForInstitution(codeTopUp, today, "Another Bank"); !included || item.Type != "income" {
+		t.Fatalf("other-bank coded income = %#v, included=%v", item, included)
+	}
 	topUp := json.RawMessage(`{
 		"entry_reference":"top-up",
 		"transaction_amount":{"currency":"EUR","amount":"500"},

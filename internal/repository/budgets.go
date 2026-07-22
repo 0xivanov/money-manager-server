@@ -26,7 +26,7 @@ const budgetSelect = `WITH selected AS (
 			SELECT sum(t.amount)
 			FROM transactions t
 			WHERE t.user_id=selected.user_id AND t.type='expense' AND t.status='booked'
-				AND NOT t.excluded_from_budget AND t.purpose='spending'
+				AND NOT t.excluded_from_budget
 				AND t.occurred_at >= selected.period_start
 				AND t.occurred_at < CASE selected.period
 					WHEN 'weekly' THEN selected.period_start + 7
@@ -133,7 +133,7 @@ func (r *Repository) QueueBudgetAlerts(ctx context.Context, reference time.Time)
 		SELECT active.*,
 			COALESCE((SELECT sum(t.amount) FROM transactions t
 				WHERE t.user_id=active.user_id AND t.type='expense' AND t.status='booked'
-					AND NOT t.excluded_from_budget AND t.purpose='spending'
+					AND NOT t.excluded_from_budget
 					AND t.occurred_at >= active.period_start
 					AND t.occurred_at < CASE active.period WHEN 'weekly' THEN active.period_start+7
 						ELSE (active.period_start+INTERVAL '1 month')::date END

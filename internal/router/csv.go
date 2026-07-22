@@ -13,15 +13,11 @@ func transactionsCSV(transactions []model.Transaction) ([]byte, error) {
 	writer := csv.NewWriter(&buffer)
 	if err := writer.Write([]string{
 		"occurred_at", "type", "category", "description", "amount", "currency", "source", "status",
-		"excluded_from_budget", "purpose", "investment_schedule_id",
+		"excluded_from_budget",
 	}); err != nil {
 		return nil, err
 	}
 	for _, transaction := range transactions {
-		investmentScheduleID := ""
-		if transaction.InvestmentScheduleID != nil {
-			investmentScheduleID = strconv.Itoa(*transaction.InvestmentScheduleID)
-		}
 		if err := writer.Write([]string{
 			transaction.OccurredAt,
 			transaction.Type,
@@ -32,8 +28,6 @@ func transactionsCSV(transactions []model.Transaction) ([]byte, error) {
 			transaction.Source,
 			transaction.Status,
 			strconv.FormatBool(transaction.ExcludedFromBudget),
-			transaction.Purpose,
-			investmentScheduleID,
 		}); err != nil {
 			return nil, err
 		}
