@@ -94,27 +94,6 @@ func TestRepositoryIntegration(t *testing.T) {
 	if classifiedImport == nil || classifiedImport.Category != "shopping" {
 		t.Fatalf("classified duplicate import = %#v", classifiedImport)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO transactions(
-		user_id,type,category,description,amount,currency,occurred_at,source,status
-	) VALUES
-		($1,'expense','shopping','Pending transaction',300,'EUR','2026-07-13','manual','pending'),
-		($1,'expense','shopping','Cancelled transaction',400,'EUR','2026-07-14','manual','cancelled')`,
-		user.ID,
-	); err != nil {
-		t.Fatalf("insert non-booked transactions: %v", err)
-	}
-	transactions, err = repo.ListTransactions(ctx, user.ID, TransactionFilter{
-		From: monthStart, To: monthStart.AddDate(0, 1, 0),
-	})
-	if err != nil || len(transactions) != 2 {
-		t.Fatalf("booked transaction list = %#v, %v", transactions, err)
-	}
-	exportedTransactions, err := repo.ExportTransactions(
-		ctx, user.ID, monthStart, monthStart.AddDate(0, 1, 0), 100,
-	)
-	if err != nil || len(exportedTransactions) != 2 {
-		t.Fatalf("booked transaction export = %#v, %v", exportedTransactions, err)
-	}
 	for range 2 {
 		if _, err := repo.CreateTransaction(ctx, user.ID, model.TransactionRequest{
 			Type: "income", Category: "salary", Amount: "999999999999.99", Currency: "EUR", OccurredAt: "2026-07-11",
@@ -245,7 +224,7 @@ func TestRepositoryIntegration(t *testing.T) {
 	firstSync, err := repo.ImportOpenBankingTransactions(ctx, user.ID, accountID, []OpenBankingTransactionSeed{{
 		ExternalID: "bank-transaction-1", Type: "expense", Category: "food",
 		Description: "Fresh Market", Amount: "42.80", Currency: "EUR",
-		OccurredAt: monthStart.AddDate(0, 0, 10), Status: "booked", Metadata: []byte(`{"mcc":"5411"}`),
+		OccurredAt: monthStart.AddDate(0, 0, 10), Metadata: []byte(`{"mcc":"5411"}`),
 	}}, claimTime)
 	if err != nil || firstSync.Imported != 1 || firstSync.Notifications != 0 {
 		t.Fatalf("initial bank sync = %#v, %v", firstSync, err)
@@ -254,12 +233,12 @@ func TestRepositoryIntegration(t *testing.T) {
 		{
 			ExternalID: "bank-transaction-1", Type: "expense", Category: "food",
 			Description: "Fresh Market", Amount: "42.80", Currency: "EUR",
-			OccurredAt: monthStart.AddDate(0, 0, 10), Status: "booked", Metadata: []byte(`{"mcc":"5411"}`),
+			OccurredAt: monthStart.AddDate(0, 0, 10), Metadata: []byte(`{"mcc":"5411"}`),
 		},
 		{
 			ExternalID: "bank-transaction-2", Type: "expense", Category: "transport",
 			Description: "Metro", Amount: "2.00", Currency: "EUR",
-			OccurredAt: monthStart.AddDate(0, 0, 11), Status: "booked", Metadata: []byte(`{"mcc":"4111"}`),
+			OccurredAt: monthStart.AddDate(0, 0, 11), Metadata: []byte(`{"mcc":"4111"}`),
 		},
 	}, claimTime)
 	if err != nil || secondSync.Imported != 1 || secondSync.Unchanged != 1 || secondSync.Notifications != 1 {
@@ -295,7 +274,7 @@ func TestRepositoryIntegration(t *testing.T) {
 	thirdSync, err := repo.ImportOpenBankingTransactions(ctx, user.ID, accountID, []OpenBankingTransactionSeed{{
 		ExternalID: "bank-transaction-1", Type: "expense", Category: "transport",
 		Description: "Updated BOLT ride", Amount: "43.00", Currency: "EUR",
-		OccurredAt: monthStart.AddDate(0, 0, 10), Status: "booked",
+		OccurredAt: monthStart.AddDate(0, 0, 10),
 		Metadata: []byte(`{
 			"classification_source":"expense_keyword",
 			"classified_category":"transport",
@@ -351,7 +330,7 @@ func TestRepositoryIntegration(t *testing.T) {
 	suppressedSync, err := repo.ImportOpenBankingTransactions(ctx, user.ID, accountID, []OpenBankingTransactionSeed{{
 		ExternalID: "bank-transaction-2", Type: "expense", Category: "transport",
 		Description: "Metro", Amount: "2.00", Currency: "EUR",
-		OccurredAt: monthStart.AddDate(0, 0, 11), Status: "booked", Metadata: []byte(`{"mcc":"4111"}`),
+		OccurredAt: monthStart.AddDate(0, 0, 11), Metadata: []byte(`{"mcc":"4111"}`),
 	}}, claimTime)
 	if err != nil || suppressedSync.Imported != 0 || suppressedSync.Updated != 0 || suppressedSync.Unchanged != 0 {
 		t.Fatalf("sync after manual bank transaction deletion = %#v, %v", suppressedSync, err)
@@ -388,7 +367,7 @@ func TestRepositoryIntegration(t *testing.T) {
 	replacementSync, err := repo.ImportOpenBankingTransactions(ctx, user.ID, replacementAccountID, []OpenBankingTransactionSeed{{
 		ExternalID: "bank-transaction-2", Type: "expense", Category: "transport",
 		Description: "Metro", Amount: "2.00", Currency: "EUR",
-		OccurredAt: monthStart.AddDate(0, 0, 11), Status: "booked", Metadata: []byte(`{"mcc":"4111"}`),
+		OccurredAt: monthStart.AddDate(0, 0, 11), Metadata: []byte(`{"mcc":"4111"}`),
 	}}, claimTime)
 	if err != nil || replacementSync.Imported != 0 || replacementSync.Updated != 0 || replacementSync.Unchanged != 0 {
 		t.Fatalf("sync after bank account replacement = %#v, %v", replacementSync, err)
@@ -598,7 +577,7 @@ func TestRevolutTopupCleanupMigration(t *testing.T) {
 	result, err := repo.ImportOpenBankingTransactions(ctx, user.ID, revolutAccountID, []OpenBankingTransactionSeed{{
 		ExternalID: "revolut-topup", Type: "income", Category: "other", Description: "Top-Up by *9147",
 		Amount: "700.00", Currency: "EUR", OccurredAt: time.Date(2026, 7, 22, 0, 0, 0, 0, time.UTC),
-		Status: "booked", Metadata: []byte(`{"bank_transaction_code":"TOPUP"}`),
+		Metadata: []byte(`{"bank_transaction_code":"TOPUP"}`),
 	}}, time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC))
 	if err != nil || result.Imported != 0 || result.Updated != 0 || result.Unchanged != 0 {
 		t.Fatalf("suppressed top-up reimport = %#v, %v", result, err)
@@ -718,6 +697,63 @@ func TestInvestmentTradeMigrationBackfillsMarketDataAuditFields(t *testing.T) {
 	}
 	if !amountIsUnbounded {
 		t.Fatal("amount column does not preserve arbitrary legacy decimal scale")
+	}
+}
+
+func TestTransactionStatusMigrationBooksExistingRows(t *testing.T) {
+	ctx, repo, pool := openIntegrationRepository(t)
+	if _, err := pool.Exec(ctx, `CREATE TABLE schema_migrations (
+		version BIGINT PRIMARY KEY,
+		name TEXT NOT NULL,
+		applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`); err != nil {
+		t.Fatalf("create migration table: %v", err)
+	}
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range migrations {
+		if item.version >= 22 {
+			break
+		}
+		if _, err := pool.Exec(ctx, item.sql); err != nil {
+			t.Fatalf("apply migration %d: %v", item.version, err)
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO schema_migrations(version,name) VALUES($1,$2)`, item.version, item.name); err != nil {
+			t.Fatalf("record migration %d: %v", item.version, err)
+		}
+	}
+
+	user, err := repo.RegisterUser(ctx, "book-all@example.com", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO transactions(
+		user_id,type,category,description,amount,currency,occurred_at,source,status
+	) VALUES
+		($1,'expense','shopping','Pending transaction',309,'EUR','2026-07-22','open_banking','pending'),
+		($1,'expense','dining_out','Cancelled transaction',1.85,'EUR','2026-07-22','open_banking','cancelled')`,
+		user.ID,
+	); err != nil {
+		t.Fatalf("insert legacy transaction statuses: %v", err)
+	}
+
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatalf("apply transaction status migration: %v", err)
+	}
+	var booked int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM transactions
+		WHERE user_id=$1 AND status='booked'`, user.ID).Scan(&booked); err != nil {
+		t.Fatal(err)
+	}
+	if booked != 2 {
+		t.Fatalf("booked transactions = %d", booked)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO transactions(
+		user_id,type,category,amount,currency,occurred_at,status
+	) VALUES($1,'expense','other',5,'EUR','2026-07-23','pending')`, user.ID); err == nil {
+		t.Fatal("database accepted a non-booked transaction")
 	}
 }
 
@@ -868,7 +904,7 @@ func TestOpenBankingCategoryMigrationBackfillsAndPreservesOverrides(t *testing.T
 		{
 			ExternalID: "legacy-auto-salary", Type: "income", Category: "freelance",
 			Description: "ACME client invoice", Amount: "3200.00", Currency: "EUR",
-			OccurredAt: time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC), Status: "booked",
+			OccurredAt: time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC),
 			Metadata: []byte(`{
 				"classification_source":"income_keyword",
 				"classified_category":"freelance",
@@ -879,7 +915,7 @@ func TestOpenBankingCategoryMigrationBackfillsAndPreservesOverrides(t *testing.T
 		{
 			ExternalID: "manual-gift", Type: "expense", Category: "transport",
 			Description: "Updated BOLT ride", Amount: "21.00", Currency: "EUR",
-			OccurredAt: time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC), Status: "booked",
+			OccurredAt: time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC),
 			Metadata: []byte(`{
 				"classification_source":"expense_keyword",
 				"classified_category":"transport",
@@ -967,7 +1003,7 @@ func TestLegacySchemaUpgradeQuarantinesInvalidRows(t *testing.T) {
 	if err := pool.QueryRow(ctx, "SELECT count(*) FROM schema_migrations").Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if users != 1 || categories != 6 || transactions != 1 || quarantined != 8 || versions != 18 {
+	if users != 1 || categories != 5 || transactions != 1 || quarantined != 8 || versions != 22 {
 		t.Fatalf("legacy upgrade counts users=%d categories=%d transactions=%d quarantined=%d versions=%d", users, categories, transactions, quarantined, versions)
 	}
 	var email, transactionType, category, currency string

@@ -244,7 +244,7 @@ func TestSyncOpenBankingAccountPaginatesNormalizesAndPersists(t *testing.T) {
 			return json.RawMessage(`{"transactions":[{
 				"entry_reference":"expense-1","merchant_category_code":"5411",
 				"transaction_amount":{"currency":"EUR","amount":"42.8"},
-				"credit_debit_indicator":"DBIT","status":"BOOK","booking_date":"2026-07-12",
+				"credit_debit_indicator":"DBIT","status":"PDNG","booking_date":"2026-07-12",
 				"creditor":{"name":"Fresh Market"}
 			}],"continuation_key":"next-page"}`), nil
 		}

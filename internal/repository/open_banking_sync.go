@@ -23,7 +23,6 @@ type OpenBankingTransactionSeed struct {
 	Amount      string
 	Currency    string
 	OccurredAt  time.Time
-	Status      string
 	Metadata    json.RawMessage
 }
 
@@ -124,19 +123,17 @@ func (r *Repository) ImportOpenBankingTransactions(
 		err = tx.QueryRow(ctx, `INSERT INTO transactions(
 			user_id,type,category,description,amount,currency,occurred_at,source,status,
 			source_account_id,external_id,source_metadata
-		) VALUES($1,$2,$3,$4,$5,$6,$7,'open_banking',$8,$9,$10,$11)
+		) VALUES($1,$2,$3,$4,$5,$6,$7,'open_banking','booked',$8,$9,$10)
 		ON CONFLICT(user_id,source_account_id,external_id)
 		WHERE source='open_banking' AND source_account_id IS NOT NULL AND external_id IS NOT NULL
 		DO NOTHING RETURNING id`, userID, effectiveType, effectiveCategory, item.Description,
-			item.Amount, item.Currency, item.OccurredAt, item.Status, accountID,
-			item.ExternalID, effectiveMetadata,
+			item.Amount, item.Currency, item.OccurredAt, accountID, item.ExternalID, effectiveMetadata,
 		).Scan(&transactionID)
 		inserted := err == nil
-		previousStatus := ""
 		if errors.Is(err, pgx.ErrNoRows) {
 			var currentType, currentCategory, currentDescription string
 			var classificationOverride, typeOverride, categoryOverride bool
-			err = tx.QueryRow(ctx, `SELECT id,status,type,category,description,
+			err = tx.QueryRow(ctx, `SELECT id,type,category,description,
 					source_metadata @> '{"classification_override":true}'::jsonb,
 					source_metadata @> '{"type_override":true}'::jsonb,
 					source_metadata @> '{"category_override":true}'::jsonb
@@ -144,7 +141,7 @@ func (r *Repository) ImportOpenBankingTransactions(
 				WHERE user_id=$1 AND source='open_banking' AND source_account_id=$2 AND external_id=$3
 				FOR UPDATE`, userID, accountID, item.ExternalID,
 			).Scan(
-				&transactionID, &previousStatus, &currentType, &currentCategory,
+				&transactionID, &currentType, &currentCategory,
 				&currentDescription, &classificationOverride, &typeOverride, &categoryOverride,
 			)
 			if err != nil {
@@ -162,11 +159,11 @@ func (r *Repository) ImportOpenBankingTransactions(
 			effectiveDescription := preserveUserClarification(item.Description, currentDescription)
 			tag, updateErr := tx.Exec(ctx, `UPDATE transactions SET
 				type=$1,category=$2,description=$3,amount=$4,currency=$5,occurred_at=$6,
-				status=$7,source_metadata=$8,updated_at=now()
-				WHERE id=$9 AND (type,category,description,amount,currency,occurred_at,status,source_metadata)
-				IS DISTINCT FROM ($1,$2,$3,$4::numeric,$5,$6::date,$7,$8::jsonb)`,
+				status='booked',source_metadata=$7,updated_at=now()
+				WHERE id=$8 AND (type,category,description,amount,currency,occurred_at,source_metadata)
+				IS DISTINCT FROM ($1,$2,$3,$4::numeric,$5,$6::date,$7::jsonb)`,
 				effectiveType, effectiveCategory, effectiveDescription, item.Amount, item.Currency,
-				item.OccurredAt, item.Status, effectiveMetadata, transactionID)
+				item.OccurredAt, effectiveMetadata, transactionID)
 			if updateErr != nil {
 				return model.OpenBankingSyncResult{}, updateErr
 			}
@@ -181,9 +178,7 @@ func (r *Repository) ImportOpenBankingTransactions(
 			result.Imported++
 		}
 
-		becameBookedExpense := effectiveType == "expense" && item.Status == "booked" &&
-			(inserted || previousStatus != "booked")
-		if initialSync || !becameBookedExpense {
+		if initialSync || effectiveType != "expense" || !inserted {
 			continue
 		}
 		payload, marshalErr := json.Marshal(map[string]any{
@@ -197,7 +192,7 @@ func (r *Repository) ImportOpenBankingTransactions(
 			return model.OpenBankingSyncResult{}, marshalErr
 		}
 		sum := sha256.Sum256([]byte(item.ExternalID))
-		eventKey := fmt.Sprintf("open-banking:%d:%s:booked", accountID, hex.EncodeToString(sum[:]))
+		eventKey := fmt.Sprintf("open-banking:%d:%s:transaction", accountID, hex.EncodeToString(sum[:]))
 		title := "New bank spending"
 		bodyAccount := accountName
 		if bodyAccount == "" {

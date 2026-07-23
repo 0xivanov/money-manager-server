@@ -246,7 +246,6 @@ func normalizeOpenBankingTransactionForInstitution(
 	if occurredAt.IsZero() || occurredAt.After(today) {
 		return repository.OpenBankingTransactionSeed{}, false
 	}
-	status := openBankingTransactionStatus(transaction.Status)
 	description := openBankingTransactionDescription(transaction, transactionType)
 	merchantCategoryCode := openBankingMerchantCategoryCode(transaction.MerchantCategoryCode)
 	classification := classifyOpenBankingTransaction(
@@ -269,7 +268,6 @@ func normalizeOpenBankingTransactionForInstitution(
 		externalID = "hashed:" + hex.EncodeToString(sum[:])
 	}
 	metadata, err := json.Marshal(map[string]any{
-		"provider_status":          strings.ToUpper(strings.TrimSpace(transaction.Status)),
 		"entry_reference":          truncateBytes(strings.TrimSpace(transaction.EntryReference), 500),
 		"merchant_category_code":   truncateBytes(merchantCategoryCode, 20),
 		"bank_transaction_code":    truncateBytes(strings.TrimSpace(transaction.BankTransactionCode.Code), 40),
@@ -285,7 +283,7 @@ func normalizeOpenBankingTransactionForInstitution(
 	return repository.OpenBankingTransactionSeed{
 		ExternalID: externalID, Type: transactionType, Category: classification.Category,
 		Description: description, Amount: amount, Currency: currency,
-		OccurredAt: occurredAt, Status: status, Metadata: metadata,
+		OccurredAt: occurredAt, Metadata: metadata,
 	}, true
 }
 
@@ -356,17 +354,6 @@ func firstValidOpenBankingDate(values ...string) time.Time {
 		}
 	}
 	return time.Time{}
-}
-
-func openBankingTransactionStatus(value string) string {
-	switch strings.ToUpper(strings.TrimSpace(value)) {
-	case "BOOK":
-		return "booked"
-	case "CNCL", "RJCT":
-		return "cancelled"
-	default:
-		return "pending"
-	}
 }
 
 func openBankingTransactionDescription(transaction enableBankingTransaction, transactionType string) string {
