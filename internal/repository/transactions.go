@@ -21,7 +21,8 @@ type TransactionFilter struct {
 func (r *Repository) ListTransactions(ctx context.Context, userID int, filter TransactionFilter) ([]model.Transaction, error) {
 	query := `SELECT id,type,category,description,amount::text,currency,to_char(occurred_at,'YYYY-MM-DD'),
 		source,status,excluded_from_budget,schedule_occurrence_id
-        FROM transactions WHERE user_id=$1 AND occurred_at >= $2 AND occurred_at < $3`
+        FROM transactions
+        WHERE user_id=$1 AND occurred_at >= $2 AND occurred_at < $3 AND status='booked'`
 	args := []any{userID, filter.From, filter.To}
 	if filter.Type != "" {
 		query += fmt.Sprintf(" AND type=$%d", len(args)+1)
@@ -53,7 +54,8 @@ func (r *Repository) ListTransactions(ctx context.Context, userID int, filter Tr
 func (r *Repository) ExportTransactions(ctx context.Context, userID int, from, toExclusive time.Time, limit int) ([]model.Transaction, error) {
 	rows, err := r.db.Query(ctx, `SELECT id,type,category,description,amount::text,currency,to_char(occurred_at,'YYYY-MM-DD'),
 		source,status,excluded_from_budget,schedule_occurrence_id
-        FROM transactions WHERE user_id=$1 AND occurred_at >= $2 AND occurred_at < $3
+        FROM transactions
+        WHERE user_id=$1 AND occurred_at >= $2 AND occurred_at < $3 AND status='booked'
 		ORDER BY occurred_at ASC,id ASC LIMIT $4`, userID, from, toExclusive, limit)
 	if err != nil {
 		return nil, err

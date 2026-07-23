@@ -94,6 +94,27 @@ func TestRepositoryIntegration(t *testing.T) {
 	if classifiedImport == nil || classifiedImport.Category != "shopping" {
 		t.Fatalf("classified duplicate import = %#v", classifiedImport)
 	}
+	if _, err := pool.Exec(ctx, `INSERT INTO transactions(
+		user_id,type,category,description,amount,currency,occurred_at,source,status
+	) VALUES
+		($1,'expense','shopping','Pending transaction',300,'EUR','2026-07-13','manual','pending'),
+		($1,'expense','shopping','Cancelled transaction',400,'EUR','2026-07-14','manual','cancelled')`,
+		user.ID,
+	); err != nil {
+		t.Fatalf("insert non-booked transactions: %v", err)
+	}
+	transactions, err = repo.ListTransactions(ctx, user.ID, TransactionFilter{
+		From: monthStart, To: monthStart.AddDate(0, 1, 0),
+	})
+	if err != nil || len(transactions) != 2 {
+		t.Fatalf("booked transaction list = %#v, %v", transactions, err)
+	}
+	exportedTransactions, err := repo.ExportTransactions(
+		ctx, user.ID, monthStart, monthStart.AddDate(0, 1, 0), 100,
+	)
+	if err != nil || len(exportedTransactions) != 2 {
+		t.Fatalf("booked transaction export = %#v, %v", exportedTransactions, err)
+	}
 	for range 2 {
 		if _, err := repo.CreateTransaction(ctx, user.ID, model.TransactionRequest{
 			Type: "income", Category: "salary", Amount: "999999999999.99", Currency: "EUR", OccurredAt: "2026-07-11",
